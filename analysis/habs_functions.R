@@ -1,7 +1,11 @@
 
 ##### FUNCTIONS ########
 
-# Scale reads using mcmurdie holmes method to a given library size of n
+# Scales reads by 
+# 1) taking proportions,
+# 2) multiplying by a given library size of n
+# 3) rounding down
+# To emulate suggestion in mcmurdie and holmes 2014 use n of min(sample_sums(physeq))
 scale_reads <- function(physeq, n) {
   physeq.scale <-
     transform_sample_counts(physeq, function(x) {
@@ -33,22 +37,16 @@ doadonis <- function(physeq, category) {
   
   # Adonis test
   adonis.bdist <- adonis(bdist ~ col)
+  print("Adonis results:")
   print(adonis.bdist)
   
   # Homogeneity of dispersion test
   betatax = betadisper(bdist,col)
   p = permutest(betatax)
-  print("The homogeneity of dispersion:")
+  print("Betadisper results:")
   print(p$tab)
 }
 
-
-# Function to make a pcoa plot with bray-cutis distance where color variable is discrete
-make_pcoa <- function(physeq) {
-  physeq.scale <- scale_reads(physeq, min(sample_sums(physeq)))
-  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
-  physeq.bray.nmds <- ordinate(physeq.scale, method = "PCoA","bray")
-}
 
 
 # This function takes a phyloseq object, agglomerates OTUs to the desired taxonomic rank, 
