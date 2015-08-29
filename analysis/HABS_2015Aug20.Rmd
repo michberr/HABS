@@ -1,0 +1,25 @@
+---
+title: "HABs 16s August 27th 2015"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+The main goals for this week were:
+
+1) Explore synechococcus further:
+    - are oligotype/MED results robust?
+    - Email murat
+    - can we really tell if the variation is just copy number variants? What about intraspecific variation
+
+2) Explore limnohabitans:
+    - it can be a phototroph or heterotroph
+    - oligotype it 
+
+3) Explore chloroplasts
+
+4) look at correlations of environmental variables
+ 
+5) Work on fixing Edna's code
+
