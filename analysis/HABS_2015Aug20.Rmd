@@ -23,3 +23,205 @@ The main goals for this week were:
  
 5) Work on fixing Edna's code
 
+
+```{r load libraries, warning = FALSE, message = FALSE, echo=FALSE}
+#Load libraries
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(plyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(gridExtra)
+library(RColorBrewer)
+source("habs_functions.R")
+```
+
+
+
+```{r mothur import, echo = FALSE}
+
+# Import mothur files and sample metadata
+sharedfile = "mothur/allhabs.shared"
+taxfile = "mothur/allhabs.taxonomy"
+mapfile = "other/best_metadata.csv"
+ 
+mothurdata = import_mothur(mothur_shared_file = sharedfile, 
+	mothur_constaxonomy_file = taxfile)
+
+# Add the OTU number as a column in the taxonomy file
+tax_table(mothurdata) <- cbind(tax_table(mothurdata), 
+	row.names(tax_table(mothurdata)))
+
+# Rename the taxonomy columns
+colnames(tax_table(mothurdata)) <- c("Kingdom", "Phylum", "Class", "Order", 
+	"Family", "Genus", "Species")
+  
+# Import sample metadata
+map <- read.csv(mapfile)
+map <- sample_data(map)
+rownames(map) <- map$SampleID
+  
+# Merge mothurdata object with sample metadata
+moth_merge = merge_phyloseq(mothurdata, map)
+
+# Filter out non-samples (i.e. water,mock) and samples from intensive cruises.
+# Also prune out taxa which were only present in removed samples
+moth_chloro <- subset_samples(moth_merge,Type == "sample")
+moth_chloro <- prune_taxa(taxa_sums(moth_chloro) > 0, moth_chloro)
+
+# Filter out non-bacteria, chloroplasts and mitochondria
+moth_chloro <- subset_taxa(moth_chloro, Kingdom == "Bacteria")
+moth_chloro <- subset_taxa(moth_chloro, Family != "mitochondria")
+moth_good <- subset_taxa(moth_chloro, Class != "Chloroplast")
+
+phylum.colors <- c("#CBD588", "#5F7FC7", "orange", "#DA5724", "#89C5DA",
+	"#508578", "#CD9BCD", "#74D944", "#D7C1B1", "#AD6F3B", "#673770","#D14285",
+	"#689030", "#6DDE88", "#652926", "#7FDCC0", "#C84248", "#8569D5", "#5E738F",
+	"#D1A33D", "#8A7C64", "#599861"
+)
+
+```
+
+```{r echo = FALSE, fig.height = 10, fig.width = 14}
+sampdat <- data.frame(
+  sample_data(moth_good)[ , c("Date", "SampleID", "Station", "Fraction") ] 
+)
+sampdat$Sums <- sample_sums(moth_good)
+```
+
+# Synechococcus
+```{r}
+# Normalize synechococcus reads, not really sure how to do this . . . 
+# Problem is to subsample an OTU table and then translate back to a fasta
+theme_set(theme_bw())
+
+ggplot(data.frame(sum=sample_sums(moth_good)), aes(sum)) + 
+  geom_histogram(colour="white", fill="indianred") +
+  ggtitle("Sample read counts") + 
+  xlab("total sequences")
+
+# mean, max and min of sample read counts
+mins<-min(sample_sums(moth_good))
+means<-mean(sample_sums(moth_good))
+maxs<-max(sample_sums(moth_good))
+
+ggplot(data.frame(sum=sample_sums(moth_chloro)), aes(sum)) + 
+  geom_histogram(colour="white", fill="indianred") +
+  ggtitle("Sample read counts") + 
+  xlab("total sequences")
+
+# mean, max and min of sample read counts
+mins<-min(sample_sums(moth_chloro))
+means<-mean(sample_sums(moth_chloro))
+maxs<-max(sample_sums(moth_chloro))
+
+```
+
+# Limnohabitans
+```{r, echo=FALSE, fig.height = 10, fig.width = 14}
+
+# Limnohabitans oligotypes
+lim.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/limnohabitans/limnohabitans_oligotyping-sc2-s1-a0.0-A0-M50/MATRIX-COUNT.txt", sep = "\t")
+
+lim.melt <- oligo_prep(lim.oligo, sampdat)
+oligoplot(lim.melt, "Limnohabitans")
+
+```
+
+
+# Chloroplasts
+
+```{r, echo = FALSE, fig.height = 10, fig.width = 14}
+
+w <- which(tax_table(moth_chloro)[,"Class"] == "Chloroplast")
+tax_table(moth_chloro)[w,"Phylum"]<-"Chloroplast"
+
+# Transform to long format and prune out phyla below 5% in each sample
+moth.long <- transform_and_melt(
+  physeq = moth_chloro,
+	taxrank = "Phylum",
+  prune = .05)
+
+moth.format <- habs_format(phy.long = moth.long)
+
+# Plot 
+make_tax_barplot(
+  df = moth.format, 
+  x = "Date", 
+  y = "Abundance",
+  tax = "Taxonomy",
+  facet = "Fraction~Station",
+  title = "",
+  colors = phylum.colors,
+  xlab = "",
+  ylab = "Relative Abundance\n",
+  outline = "black",
+  relative = TRUE,
+  guide = TRUE
+)
+
+# Oligotyping with chloroplasts
+#chl.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/chloroplasts/chloro_oligotyping-m0.10-A0-M1000-d4/MATRIX-COUNT.txt", sep = "\t")
+
+chl.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/chloroplasts/chloro_oligotyping-m0.10-A0-M5000-d4/MATRIX-COUNT.txt", sep = "\t")
+
+# Make new sapdat for chloros included
+sampdat.chloro <- data.frame(
+  sample_data(moth_chloro)[ , c("Date", "SampleID", "Station", "Fraction") ] 
+)
+sampdat.chloro$Sums <- sample_sums(moth_chloro)
+
+# Melt chloroplast data
+chl.melt <- oligo_prep(chl.oligo, sampdat.chloro)
+
+oligoplot(chl.melt, "Chloroplasts")
+```
+
+# Correlations
+
+```{r}
+library(mvabund)
+
+# Transform to relative proportions
+
+# Subset to cyanos
+cyanos <- subset_taxa(physeq = moth_good, Phylum == "Cyanobacteria")
+
+# glom to phylum
+
+# mvabund to test effect of temperature, carbon source, nitrogen, etc on taxonomic composition 
+
+
+```
+
+
+# Conclusions
+
+```{r}
+
+
+```
+
+1) Synechococcus
+-  Review http://mmbr.asm.org/content/73/2/249.full
+Because of their small genomes, marine picocyanobacteria possess a limited gene complement per cell (Table 1). Gene number ranges from 2,358 to 3,129 in Synechococcus to 1,716 to 3,022 in Prochlorococcus and with few paralogous genes. The high diversity of gene complement plus efficient horizontal gene transfer (213) suggests that marine picocyanobacteria conform to the distributed-genome hypothesis, i.e., that their full complement of genes exists in a “supragenome,” one that each member of the population contributes to and draws genes from; in other words, no single isolate contains the full complement of genes, resulting in a high degree of genomic variation (65). Thus, their supragenome (sometimes also called “pan-genome” [288]) is probably several orders of magnitude larger than the genome of any single strain and consists of a large set of noncore genes from which highly variable subsets of genes are brought together in various combinations and numbers to generate the specific gene complement of each strain or ecotype.
+
+2) Limnohabitans 
+Limnohabitans has two main oligotypes - it's unclear whether the third is a real one, or just a 16s copy variant
+Limnohabitans seems to be very impacted by Microcystis - it completely disappears during the main phase of the Microcystis bloom
+
+3) Chloroplasts 
+The chloroplast data is messy because there are hundreds of oligotypes. I pruned them down heavily to just 28 with an M parameter of 5000. A few trends stick out:
+  - different oligotypes in 100um/53um vs 3um
+  - Less diversity in 100um/53um (or is this sampling bias because these samples had lower yields and generally depth)
+  - Overall, chloroplasts are a major contributor to every fraction
+  - Cyan oligotype seems to be mainly present in WE4
+  - lime green is present mainly at begining and end of season when microcystis is not abundant
+  - Grey oligotype coexists with MC, but appears to be negatively impacted?
+  
+
+4)
+
+5) Waiting till Marian is back to work on this 

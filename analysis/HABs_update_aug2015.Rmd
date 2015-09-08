@@ -115,16 +115,19 @@ phylum.colors <- c("#CBD588", "#5F7FC7", "orange", "#DA5724", "#89C5DA",
 
 
 # Transform to long format and prune out phyla below 2% in each sample
-moth.long <- transform_and_melt(physeq = moth_good,
+moth.long <- transform_and_melt(
+  physeq = moth_good,
 	taxrank = "Phylum",
 	prune = .05)
 
+moth.format <- habs_format(phy.long = moth.long)
+
 # Plot 
 make_tax_barplot(
-  df = moth.long, 
+  df = moth.format, 
   x = "Date", 
   y = "Abundance",
-  tax = "Phylum",
+  tax = "Taxonomy",
   facet = "Fraction~Station",
   title = "",
   colors = phylum.colors,
