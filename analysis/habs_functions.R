@@ -189,5 +189,43 @@ make_tax_barplot <- function(df, x, tax, facet, title, colors, xlab, ylab, relat
     
 }
 
+## run correlation analysis
+test_htroph_corr <- function(htroph.df, cyano.df, i, physeq.scale){
+  corr <- corr.test(cyano.df[,i], htroph.df, use = "everything", method = "spearman",adjust = "bonferroni")
+  
+  pvalue <- corr$p
+  r <- corr$r
+  
+  sig <- which(pvalue < 0.05)
+  otu.names <- colnames(pvalue)[sig]
+  
+  sig.tax <- data.frame(tax_table(physeq.scale))[otu.names,]
+  sig.p <- pvalue[sig]
+  sig.r <- r[sig]
+  sig.dat<-data.frame(sig.p,sig.r,sig.tax)
+  names(sig.dat)[1:2] <- c("pvalue","r")
+  sig.dat <- arrange(sig.dat, r)
+  sig.dat$Genus <- droplevels(sig.dat$Genus)
+  return(sig.dat)
+}
 
+stackbar_theme <- theme(
+  axis.title.x = element_text(size = 16,face = "bold"),
+  axis.text.x = element_text(angle = 50, 
+                             face = "bold", 
+                             vjust = 1, 
+                             hjust = 1, 
+                             size = 15),
+  axis.text.y = element_text(colour = "black", size = 10),
+  axis.title.y = element_text(face = "bold", size = 16),
+  plot.title = element_text(face = "bold", size = 22),
+  legend.title = element_text(face = "bold", size = 16),
+  legend.text = element_text(size = 14),
+  strip.text.x = element_text(size = 16, face = "bold"),
+  strip.text.y = element_text(size = 16, face = "bold"),
+  strip.background = element_rect(color = "white",size = 2, fill = NA),
+  panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.border = element_rect(colour = "black", fill = NA, size = 1.5),
+  panel.margin = unit(1, "lines")
+) 
 
