@@ -4,9 +4,9 @@
 
 order_dates <- function(df){
   df$Date <- factor(df$Date, 
-    levels = c("5/27","6/10","6/16","6/30","7/8","7/14","7/21",
+    levels = c("6/16","6/30","7/8","7/14","7/21",
       "7/29","8/4","8/11","8/18","8/25","9/2","9/8","9/15",
-      "9/23","9/29","10/6","10/15","10/20","10/27","11/3"))
+      "9/23","9/29","10/6","10/15","10/20","10/27"))
   return(df)
 }
 
@@ -19,11 +19,11 @@ habs_format <- function(phy.long){
 
   # Set all samples from 8/11 to 0 because of bad sampling on that date
   w <- which(phy.long$Date == "8/11")
-  phy.long$Abundance[w] <- 0.0 
+  phy.long$Abundance[w] <- 0
   
   # Reorder factor levers for stations
   phy.long$Station <- factor(phy.long$Station,
-    levels = c("WE2","WE12","WE4"))
+    levels = c("Toledo", "nearshore", "offshore"))
   
   # Reorder factor levels for Fraction. Change Fraction factor names
   phy.long$Fraction <- factor(phy.long$Fraction, 
@@ -99,12 +99,12 @@ oligoplot <- function(oligo.melt, title){
     scale_fill_manual(values = c("grey26","chartreuse3", "darkorange","royalblue", "red", 
                                  "cyan2", "darkgreen",phylum.colors,"white",phylum.colors,"white",phylum.colors)) + 
     scale_x_discrete(breaks=c("6/10","7/8",
-                              "8/4","9/2","10/6","11/3"),
+                              "8/4","9/2", "10/6", "11/3"),
                      labels=c("Jun", "Jul",
-                              "Aug", "Sep",  "Oct","Nov"),
-                     drop=FALSE
+                              "Aug", "Sep", "Oct", "Nov"),
+                     drop = FALSE
     )+
-    theme(axis.title.x = element_text(size=16,face="bold"),
+    theme(axis.title.x = element_text(size=16, face="bold"),
           axis.text.x = element_text(angle=50, colour = "black", 
                                      vjust=1, hjust = 1, size=12,face="bold"),
           axis.text.y = element_text(colour = "black", size=12),
@@ -121,8 +121,8 @@ oligoplot <- function(oligo.melt, title){
           panel.background = element_rect(fill=NA, color="black"),
           axis.line = element_line(colour = "black"),
           panel.margin = unit(1, "lines")
-    ) +
-    guides(fill = guide_legend(reverse= TRUE,keywidth=1,keyheight=1))+   
+    ) + 
+    guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1))+   
     xlab("")+
     ylab("Relative Abundance \n")+
     ggtitle(title)
@@ -228,4 +228,62 @@ stackbar_theme <- theme(
   panel.border = element_rect(colour = "black", fill = NA, size = 1.5),
   panel.margin = unit(1, "lines")
 ) 
+
+grid_arrange_shared_legend <- function(...) {
+  plots <- list(...)
+  g <- ggplotGrob(plots[[1]] + theme(legend.position="bottom"))$grobs
+  legend <- g[[which(sapply(g, function(x) x$name) == "guide-box")]]
+  lheight <- sum(legend$height)
+  grid.arrange(
+    do.call(arrangeGrob, lapply(plots, function(x)
+      x + theme(legend.position="none"))),
+    legend,
+    ncol = 1,
+    heights = unit.c(unit(1, "npc") - lheight, lheight))
+}
+
+
+# Scales OTU relative abundance and changes the names of the OTUs to include
+# Inputs are a phyloseq object and the taxonomic rank to combine with OTU # for the label 
+scale_otu <- function(data, taxrank, datenames) {
+  
+  data.otu <- t(otu_table(data))
+  
+  # scale the realtive abundanec of each OTU
+  data.otu <- scale(data.otu)
+  
+  # Change the taxa names to be taxrank + OTU number
+  colnames(data.otu) <- paste(tax_table(data)[ ,taxrank], 
+                              tax_table(data)[ ,"Species"])
+
+  # Fix rownames and column names
+  rownames(data.otu) <- datenames
+  colnames(data.otu) <- gsub("[.]", " ", colnames(data.otu))
+  
+  # Return scaled otu table with taxa as rows
+  return(t(data.otu))
+  
+}
+
+
+# Computes euclidean distance between OTUs and performs 
+# hierarchical clustering with complete linkage.
+# Cuts tree into number of classes given by treecut
+cluster_otu <- function(data, treecut) {
+  
+  d <- vegdist(t(data), method = "euclidean")
+  
+  data.clust <- hclust(d = d, method = "complete")
+  
+  cols <- cutree(data.clust, cut)
+  
+  data <- data.frame(data.otu)
+  data <- data[ ,data.clust$order]
+  
+  newcols <- cols[data.clust$order]
+  
+  return(list(data = data, cols = newcols))
+
+} 
+
 
