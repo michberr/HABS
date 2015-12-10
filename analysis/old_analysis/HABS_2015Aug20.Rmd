@@ -1,0 +1,372 @@
+---
+title: "HABs Update September 8, 2015"
+output:
+  html_document:
+    css: markdown.css
+    toc: true
+    fig.height: 10
+    fig.width: 14
+---
+             
+                     
+The main goals for 8/22-9/8:
+
+1) Explore synechococcus further:
+    - are oligotype/MED results robust? Try subsampling to even depth and rerunning?
+    - can we really tell if the variation is just copy number variants? What about intraspecific variation
+
+2) Explore limnohabitans:
+    - it can be a phototroph or heterotroph
+    - oligotype it 
+
+3) Explore chloroplasts
+    - oligotype it
+
+4) look at correlations of environmental variables
+ 
+5) Work on fixing Edna's code
+
+
+```{r load libraries, warning = FALSE, message = FALSE, echo=FALSE}
+#Load libraries
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(plyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(gridExtra)
+library(RColorBrewer)
+source("habs_functions.R")
+source("miseqR.R")
+```
+
+
+
+```{r mothur import, echo = FALSE}
+
+# Import mothur files and sample metadata
+sharedfile = "mothur/allhabs.shared"
+taxfile = "mothur/allhabs.taxonomy"
+mapfile = "other/habs_metadata.csv"
+ 
+mothurdata = import_mothur(mothur_shared_file = sharedfile, 
+	mothur_constaxonomy_file = taxfile)
+
+# Add the OTU number as a column in the taxonomy file
+tax_table(mothurdata) <- cbind(tax_table(mothurdata), 
+	row.names(tax_table(mothurdata)))
+
+# Rename the taxonomy columns
+colnames(tax_table(mothurdata)) <- c("Kingdom", "Phylum", "Class", "Order", 
+	"Family", "Genus", "Species")
+  
+# Import sample metadata
+map <- read.csv(mapfile)
+map <- sample_data(map)
+rownames(map) <- map$SampleID
+  
+# Merge mothurdata object with sample metadata
+moth_merge = merge_phyloseq(mothurdata, map)
+
+# Filter out non-samples (i.e. water,mock) and samples from intensive cruises.
+# Also prune out taxa which were only present in removed samples
+moth_chloro <- subset_samples(moth_merge,Type == "sample")
+moth_chloro <- prune_taxa(taxa_sums(moth_chloro) > 0, moth_chloro)
+
+# Filter out non-bacteria, chloroplasts and mitochondria
+moth_chloro <- subset_taxa(moth_chloro, Kingdom == "Bacteria")
+moth_chloro <- subset_taxa(moth_chloro, Family != "mitochondria")
+moth_good <- subset_taxa(moth_chloro, Class != "Chloroplast")
+
+phylum.colors <- c("#CBD588", "#5F7FC7", "orange", "#DA5724", "#89C5DA",
+	"#508578", "#CD9BCD", "#74D944", "#D7C1B1", "#AD6F3B", "#673770","#D14285",
+	"#689030", "#6DDE88", "#652926", "#7FDCC0", "#C84248", "#8569D5", "#5E738F",
+	"#D1A33D", "#8A7C64", "#599861"
+)
+
+```
+
+```{r echo=FALSE}
+stackbar_theme <- theme(
+  axis.title.x = element_text(size = 16,face = "bold"),
+  axis.text.x = element_text(angle = 50, 
+    face = "bold", 
+    vjust = 1, 
+    hjust = 1, 
+    size = 15),
+  axis.text.y = element_text(colour = "black", size = 10),
+  axis.title.y = element_text(face = "bold", size = 16),
+  plot.title = element_text(face = "bold", size = 22),
+  legend.title = element_text(face = "bold", size = 16),
+  legend.text = element_text(size = 14),
+  strip.text.x = element_text(size = 16, face = "bold"),
+  strip.text.y = element_text(size = 16, face = "bold"),
+  strip.background = element_rect(color = "white",size = 2, fill = NA),
+  panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.border = element_rect(colour = "black", fill = NA, size = 1.5),
+  panel.margin = unit(1, "lines")
+) 
+
+
+
+
+```
+
+
+```{r echo = FALSE}
+sampdat <- data.frame(
+  sample_data(moth_good)[ , c("Date", "SampleID", "Station", "Fraction") ] 
+)
+sampdat$Sums <- sample_sums(moth_good)
+```
+
+# Synechococcus
+
+Here is what the old Synechococcus oligotyping results look like:
+
+```{r, echo=FALSE, fig.height = 10, fig.width = 14}
+syne.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/synechococcus80/synecohococcus_oligotype-m0.10-A0-M0-d4/MATRIX-COUNT.txt", sep = "\t")
+
+syne.melt <- oligo_prep(syne.oligo, sampdat)
+oligoplot(syne.melt, "Synechococcus subsampled")
+
+
+```
+     
+To check the sensitivity of the Synechococcus oligotyping results, I subsampled the data in mothur to 5,000 reads and made
+a new fasta file to oligotype. Using this cutoff I was able to normalize the total number of reads per sample (including chloroplasts). I would have to subsample down to 500 or 1000 if I wanted to normalize bacterial reads per sample.    
+
+
+```{r, echo=FALSE, fig.height = 10, fig.width = 14}
+
+synesub.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/synechococcus_subsample/syne_subsample_oligotyping-m0.10-A0-M0-d4/MATRIX-COUNT.txt", sep = "\t")
+
+synesub.melt <- oligo_prep(synesub.oligo, sampdat)
+oligoplot(synesub.melt, "Synechococcus subsampled")
+
+
+```
+
+These look identical ... hm maybe i did something wrong? But no, the original fasta of synechococcus reads has 325,410 lines (1432 unique) and the subsampled fasta has 323,838 lines (476 unique). So the subsampling definitely worked -- it got rid of the rare reads assigned to synechococcus (which are probably filtered out in the MED pipeline)
+     
+That talk title you sent me said that Synechococcus has higher diversity in less saline systems and that there is a negative correlation with total N. The inverse correlation with N does not seem to be the case in our system, because if anything Synechococcus blooms more during the earlier part of the season when N is high. Lake Erie is fairly saline for a freshwater lake, but obviously much less so than the Baltic. 
+
+Funny aside: if you search lake erie salinity in google one of the top results is this
+http://www.csmonitor.com/1982/0414/041450.html from Christian Science monitor
+
+# Limnohabitans
+```{r, echo=FALSE, fig.height = 10, fig.width = 14}
+
+# Limnohabitans oligotypes
+lim.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/limnohabitans/limnohabitans_oligotyping-sc2-s1-a0.0-A0-M50/MATRIX-COUNT.txt", sep = "\t")
+
+lim.melt <- oligo_prep(lim.oligo, sampdat)
+oligoplot(lim.melt, "Limnohabitans")
+
+```
+
+It's unclear to me whether there is true ecological variation in Limnohabitans or whether the three Oligotypes just represent
+a 16s copy variant. The relative proportions of the three to each other don't change much throughout the season.
+
+In your email you said that limonhabitans is a typical copiotroph, reacting positively to algal bloom, but also to increased input of DOC after heavy rain events. 
+
+I made a bunch of scatter plots to look at relationships between limnohabitans abundance and other variables: 
+
+    
+
+
+```{r, echo = FALSE}
+moth.scale <- scale_reads(moth_good)
+limno <- subset_taxa(moth.scale, Genus=="Limnohabitans")
+
+p <- psmelt(limno)
+
+p.subset <- p[,c(3,13,19:21,25,27:38,40)]
+
+p.s <- p[p$Abundance != 0, ]
+
+attach(p.s)
+
+
+# Nitrate
+plot(log(Nitrate), log(Abundance),)
+fit.1 <- lm(log(Abundance)~log(Nitrate))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# Ammonia
+plot(log(Ammonia), log(Abundance))
+fit.1 <- lm(log(Abundance)~log(Ammonia))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# N to P
+plot(log(N.P), log(Abundance))
+fit.1 <- lm(log(Abundance)~log(N.P))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# SRP 
+plot(log(SRP), log(Abundance))
+fit.1 <- lm(log(Abundance)~log(SRP))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# POC
+plot(log(POC),log(Abundance))
+fit.1 <- lm(log(Abundance)~log(POC))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# Chla
+plot(LogChla, log(Abundance))
+fit.1 <- lm(log(Abundance)~LogChla)
+summary(fit.1)
+abline(fit.1, col="red")
+
+# Phycocyanin
+plot(LogPhyco, log(Abundance))
+fit.1 <- lm(log(Abundance)~log(LogPhyco))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# Temp
+plot(log(Temp), log(Abundance))
+fit.1 <- lm(log(Abundance)~log(Temp))
+summary(fit.1)
+abline(fit.1, col="red")
+
+# ParMC
+plot(LogParMC~log(Abundance))
+fit.1 <- lm(log(Abundance)~LogParMC)
+summary(fit.1)
+abline(fit.1, col="red")
+
+
+```
+
+The best fitting linear models were the ones between the abundance of limnohabitans and either Chlorophyll A or Particulate Microcystin. These relationships were both negative. 
+
+There were significant positive relationships between limnohabitans relative abundance and ammonia as well as nitrate. 
+
+It seems like Limnohabitans is responding more to environmental conditions, allochthonous carbon than DOC from the bloom.  During that October 6th date, when Microcystis seems to disappear completely (large temperature drop, which was probably accompanied by a rain event), limnohabitans shoots up to almost 10% of the full community. 
+
+# Chloroplasts
+
+```{r, echo = FALSE, fig.height = 10, fig.width = 14}
+
+w <- which(tax_table(moth_chloro)[,"Class"] == "Chloroplast")
+tax_table(moth_chloro)[w,"Phylum"]<-"Chloroplast"
+
+# Transform to long format and prune out phyla below 5% in each sample
+moth.long <- taxglom_and_melt(
+  physeq = moth_chloro,
+	taxrank = "Phylum",
+  prune = .05)
+
+moth.format <- habs_format(phy.long = moth.long)
+
+# Plot 
+ggplot(moth.format, aes(x = Date, y = Abundance, fill = Phylum)) + 
+facet_grid(Fraction~Station, scales = "free_y") +
+geom_bar(stat = "identity") +
+geom_bar(
+  stat = "identity", 
+  position = "fill", 
+  colour = "black", 
+  show_guide = FALSE
+) + 
+scale_fill_manual(values = phylum.colors) +
+scale_x_discrete(
+    breaks = c("6/10", "7/8", "8/4", "9/2", "10/6", "11/3"),
+    labels = c("Jun", "Jul", "Aug", "Sep", "Oct", "Nov"), 
+    drop = FALSE
+) + 
+stackbar_theme +
+guides(fill = guide_legend(reverse = TRUE, keywidth = 1, keyheight = 1)) +
+xlab("") +
+ylab("Relative Abundance (Phyla > 2%) \n") +
+ggtitle("Phylum Composition of Lake Erie \nBacterial Community with Chloroplasts \n")
+```
+
+```{r echo = FALSE, fig.height = 10, fig.width = 14}
+# Oligotyping with chloroplasts
+#chl.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/chloroplasts/chloro_oligotyping-m0.10-A0-M1000-d4/MATRIX-COUNT.txt", sep = "\t")
+
+chl.oligo <- read.csv("~/chabs/miseq_may2015/oligotype/chloroplasts/chloro_oligotyping-m0.10-A0-M5000-d4/MATRIX-COUNT.txt", sep = "\t")
+
+# Make new sampdat for chloros included
+sampdat.chloro <- data.frame(
+  sample_data(moth_chloro)[ , c("Date", "SampleID", "Station", "Fraction") ] 
+)
+sampdat.chloro$Sums <- sample_sums(moth_chloro)
+
+# Melt chloroplast data
+chl.melt <- oligo_prep(chl.oligo, sampdat.chloro)
+
+oligoplot(chl.melt, "Chloroplasts")
+```
+
+# Correlations
+
+```{r}
+
+```
+
+I didn't run any correlations, but I read a bunch of papers on multivariate methods
+        
+[mvabund](http://onlinelibrary.wiley.com/doi/10.1111/j.2041-210X.2012.00190.x/full) - fits a separate GLM to each OTU using a common set of explanatory variables, BUTTT most variables we would expect to be unimodal not linear    
+   
+
+[Jamil et al.2015](http://journals.plos.org/plosone/article?id=10.1371/journal.pone.0097583) Plos One used bayesian framework to link phytoplankton community data, env variables, and traits.          They use a gaussian logistic model, with parameters (optimum, tolerance, max) that are linearly dependent on species    traits. We could do this without the trait part for the HABs data. We could do it with the traits for Jeff's data.      
+            
+      
+[Ramette 2007](http://onlinelibrary.wiley.com/doi/10.1111/j.1574-6941.2007.00375.x/abstract) is a good overview of more familiar multivariate methods like ordination and db-RDA
+  
+
+# Conclusions
+
+```{r}
+
+
+```
+
+1) Synechococcus
+-  Review http://mmbr.asm.org/content/73/2/249.full
+
+- "Because of their small genomes, marine picocyanobacteria possess a limited gene complement per cell (Table 1). Gene number ranges from 2,358 to 3,129 in Synechococcus to 1,716 to 3,022 in Prochlorococcus and with few paralogous genes. The high diversity of gene complement plus efficient horizontal gene transfer (213) suggests that marine picocyanobacteria conform to the distributed-genome hypothesis, i.e., that their full complement of genes exists in a “supragenome,” one that each member of the population contributes to and draws genes from; in other words, no single isolate contains the full complement of genes, resulting in a high degree of genomic variation (65). Thus, their supragenome (sometimes also called “pan-genome” [288]) is probably several orders of magnitude larger than the genome of any single strain and consists of a large set of noncore genes from which highly variable subsets of genes are brought together in various combinations and numbers to generate the specific gene complement of each strain or ecotype."        
+       
+            
+2) Limnohabitans              
+      
+Limnohabitans has three oligotypes - it's unclear whether they are really different ecological units, or just a 16s copy variant.
+Limnohabitans is  negatively impacted by Microcystis - it completely disappears during the main phase of the Microcystis bloom. Conversely it responds positively to 
+
+          
+3) Chloroplasts      
+            
+The chloroplast data is messy because there are hundreds of oligotypes. I pruned them down heavily to just 28 with an M parameter of 5000. A few trends stick out:
+  - different oligotypes in 100um/53um vs 3um
+  - Less diversity in 100um/53um (or is this sampling bias because these samples had lower yields and generally depth)
+  - Overall, chloroplasts are a major contributor to every fraction
+  - Cyan oligotype seems to be mainly present in WE4
+  - lime green is present mainly at begining and end of season when microcystis is not abundant
+  - Grey oligotype coexists with MC, but appears to be negatively impacted?           
+        
+                      
+4) Correlations and multivariate analyses
+see papers               
+       
+               
+5) Edna's stuff:
+Didn't want to work on this while Marian was gone. Didn't have time last week, but will make it a priority over the next week        
+        
+         
+6) Other things I did:
+  - Updated lab github with [webpage](http://deneflab.github.io/MicrobeMiseq/) and demo: 
+  - Wrote and uploaded some functions such as new merge functions - see [miseqR.R](https://github.com/DenefLab/MicrobeMiseq/tree/master/R) 
+  - Made a [Shiny app](https://michberr.shinyapps.io/LakeErie)!
+  - Chatted with Tim Davis about water volumes so he can finish up qPCR data
+ 
