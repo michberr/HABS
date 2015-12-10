@@ -1,0 +1,150 @@
+---
+title: "Untitled"
+output: html_document
+---
+```{r}
+map <- read.csv("other/habs_metadata.csv")
+
+
+# Add shore as a variable
+map <-
+  map %>% 
+  mutate(Shore = as.factor(ifelse(Station == "WE2" | Station == "WE12", "nearshore",
+                                  ifelse(Station == "WE4", "offshore", NA)))
+  )
+
+map <-
+  map %>%
+    mutate(NoaaStation = Station)
+
+# Recode Station
+map$Station <- revalue(
+  map$Station, 
+  c("WE2" = "nearshore2", 
+    "WE12" = "nearshore1", 
+    "WE4" = "offshore")
+)
+
+write.csv(map, "other/habs_metadata.csv")
+```
+
+
+```{r}
+nutrient <- read.csv("other/nutrients.csv")
+```
+
+## Temperature interpolation
+```{r fig.height=6, fig.width = 9}
+
+# Interpolate temperature data points
+we2.temp <- 
+  nutrient %>%
+  filter(Station == "nearshore", Fraction == "CNA") %>%
+  select(Days, Temp) %>%
+  na.omit
+
+we12.temp <- 
+  nutrient %>%
+  filter(Station == "Toledo") %>%
+  select(Days, Temp) %>%
+  na.omit
+
+we4.temp <- 
+  nutrient %>%
+  filter(Station == "offshore") %>%
+  select(Days, Temp) %>%
+  na.omit
+
+# Fit natural cubic splines individually for each station
+library(splines)
+
+############### WE2 #####################
+
+we2.spline <- lm(Temp ~ ns(Days, 3), data = we2.temp)
+we2.predict <- data.frame(x = we2.temp$Days, y = predict(we2.spline))
+
+
+g1 <- ggplot(we2.temp, aes(x = Days, y = Temp)) +
+  geom_point(alpha = 0.6, col = "red") +
+  geom_line(data = we2.predict, aes(x, y), col = "blue") + 
+  ggtitle("Nearshore")
+
+############### WE12 #####################
+
+we12.spline <- lm(Temp ~ ns(Days, 3), data = we12.temp)
+we12.predict <- data.frame(x = we12.temp$Days, y = predict(we12.spline))
+
+
+g2 <- ggplot(we12.temp, aes(x = Days, y = Temp)) +
+  geom_point(alpha = 0.6, col = "red") +
+  geom_line(data = we12.predict, aes(x, y), col = "blue") + 
+  ggtitle("Toledo")
+
+############### WE4 #####################
+
+we4.spline <- lm(Temp ~ ns(Days, 3), data = we4.temp)
+we4.predict <- data.frame(x = we4.temp$Days, y = predict(we4.spline))
+
+
+g3 <- ggplot(we4.temp, aes(x = Days, y = Temp)) +
+  geom_point(alpha = 0.6, col = "red") +
+  geom_line(data = we4.predict, aes(x, y), col = "blue") + 
+  ggtitle("offshore")
+
+grid.arrange(g1, g2, g3, ncol = 3)
+
+# Predict temperature on days 98 and 104
+nutrient$Temp[which(nutrient$Days == 98 & nutrient$Station == "nearshore")] <- predict(we2.spline, newdata = data.frame(Days = 98))
+nutrient$Temp[which(nutrient$Days == 104 & nutrient$Station == "nearshore")] <- predict(we2.spline, newdata = data.frame(Days = 104))
+nutrient$Temp[which(nutrient$Days == 98 & nutrient$Station == "Toledo")] <- predict(we12.spline, newdata = data.frame(Days = 98))
+nutrient$Temp[which(nutrient$Days == 104 & nutrient$Station == "Toledo")] <- predict(we12.spline, newdata = data.frame(Days = 104))
+nutrient$Temp[which(nutrient$Days == 98 & nutrient$Station == "offshore")] <- predict(we4.spline, newdata = data.frame(Days = 98))
+nutrient$Temp[which(nutrient$Days == 104 & nutrient$Station == "offshore")] <- predict(we4.spline, newdata = data.frame(Days = 104))
+
+
+```
+
+# Interpolate H2O2 data
+```{r}
+
+nutrient.cna <-
+  nutrient %>%
+  filter(Fraction == "CNA")
+
+d <- data.frame(
+  pre = nutrient.cna$H2O2[nutrient.cna$Date == "6/16"], 
+  post = nutrient.cna$H2O2[nutrient.cna$Date == "7/8"], 
+  Station = nutrient.cna$Station[nutrient.cna$Date == "7/8"]
+)
+
+h2o2.630 <- 
+  d %>%
+    melt(id.vars = "Station") %>%
+    group_by(Station) %>%
+    summarise(median = median(value))
+
+# Interpolate H2O2 with medians
+nutrient$H2O2[nutrient$Date == "6/30" & nutrient$Station == "nearshore"] <- h2o2.630 %>% filter(Station == "nearshore") %>% select(median) %>% as.numeric()
+nutrient$H2O2[nutrient$Date == "6/30" & nutrient$Station == "Toledo"] <- h2o2.630 %>% filter(Station == "Toledo") %>% select(median) %>% as.numeric()
+nutrient$H2O2[nutrient$Date == "6/30" & nutrient$Station == "offshore"] <- h2o2.630 %>% filter(Station == "offshore") %>% select(median) %>% as.numeric()
+```
+
+# Interpolate SRP data
+```{r}
+# Filter to offshore station
+nutrient.cna.we4 <- filter(nutrient.cna, Station == "offshore")
+
+# Interpolate SRP with medians
+srp.818 <- median(nutrient.cna.we4$SRP[nutrient.cna.we4$Date == "8/11"], nutrient.cna.we4$SRP[nutrient.cna.we4$Date == "8/25"])
+
+nutrient$SRP[nutrient$Date == "8/18" & nutrient$Station == "offshore"] <- srp.818
+
+```
+
+# Write output
+```{r}
+
+write.csv(nutrient, "other/nutrient_cleaned.csv")
+
+
+```
