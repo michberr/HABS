@@ -27,7 +27,7 @@ knitr::opts_chunk$set(
 
 ```{r load libraries}
 
-#Load libraries
+# Load libraries
 setwd("~/chabs/miseq_may2015/analysis")
 library(phyloseq)
 library(DESeq2)
@@ -70,20 +70,6 @@ colnames(tax_table(mothurdata)) <-
 # Import sample metadata and transform into sample_data class
 map <- read.csv(mapfile)
 
-# Recode Station
-map$Station <- revalue(
-  map$Station, 
-  c("WE2" = "nearshore", 
-  "WE12" = "Toledo", 
-  "WE4" = "offshore")
-)
-
-# Add shore as a variable
-map <-
-  map %>% 
-    mutate(Shore = as.factor(ifelse(Station == "nearshore" | Station == "Toledo", "nearshore",
-                          ifelse(Station == "offshore", "offshore", NA)))
-           )
 ```
 
 
@@ -153,14 +139,15 @@ nutrient <-
     filter(!(Date %in% c("5/27", "6/10", "11/3"))) %>%
     order_dates() 
 
+nutrient$Station <- revalue(nutrient$Station, c("nearshore" = "nearshore2", "Toledo" = "nearshore1"))
+nutrient$Station <- factor(nutrient$Station, levels = c("nearshore1", "nearshore2", "offshore"))
+
 ```
               
               
 # Intro
 <br>
-```{r}
-x = 3
-```
+
                      
 This is an analysis of the full community ( >0.22um ) Lake Erie HABs samples from June to October 2014. Samples were collected on 19 dates in roughly
 weekly intervals. Sample depths were normalized to 15000 reads and at this depth there were a total of `r ntaxa(erie)` OTUs        
@@ -169,9 +156,6 @@ weekly intervals. Sample depths were normalized to 15000 reads and at this depth
      
 ## Research Questions
 <br>
-```{r}
-x = 4
-```
 
 ***How does bacterial diversity and community composition vary across time and space during a bloom?***
 
@@ -184,9 +168,7 @@ x = 4
 <br>
       
 # Results
-```{r}
-x = 3
-```
+
 <br> 
      
 ## Figure 1: Map
@@ -201,23 +183,23 @@ myMap <- get_map(
   crop = FALSE
 )
 
-mean.phyco <-
+median.phyco <-
   nutrient %>% 
     group_by(Station) %>% 
     summarise(phyco = median(Phycocyanin))
 
-Station = c("nearshore", "Toledo", "offshore")
+Station = c("nearshore2", "nearshore1", "offshore")
 lat = c(41.7621666, 41.703166, 41.82666)
 lng = c(-83.33, -83.25433, -83.193)
-Phyco = c(mean.phyco$phyco[1], mean.phyco$phyco[3], mean.phyco$phyco[2])
+Phyco = c(median.phyco$phyco[2], median.phyco$phyco[1], median.phyco$phyco[3])
 
 
 station.data <- data.frame(Station, lat, lng, Phyco)
 
 ggmap(myMap) +
   geom_point(data = station.data, aes(x = lng, y = lat, size = Phyco), alpha = .8, color = "darkgreen", show_guide = FALSE) +
-  annotate('text', x = -83.3, y = 41.795 , label = "nearshore", size = 4) +
-  annotate('text', x = -83.24, y = 41.73, label = "Toledo", size = 4) +
+  annotate('text', x = -83.3, y = 41.795 , label = "nearshore2", size = 4) +
+  annotate('text', x = -83.24, y = 41.73, label = "nearshore1", size = 4) +
   annotate('text', x = -83.18, y = 41.848, label = "offshore", size = 4) 
 
 ```
@@ -229,293 +211,206 @@ ggmap(myMap) +
 ## Figure 2: Bloom and Bacterial Composition 
 
 <br>
-```{r fig.height=8, fig.width=15}
+```{r fig.height=12, fig.width=10}
 
-# Subset to Toledo station
-nutrient.we12 <- filter(nutrient, Station == "Toledo" & Fraction == "CNA")
+# Subset to Toledo station (nearshore1), full community, and not 8/11
+nutrient.full <- 
+  nutrient %>%
+    filter(Fraction == "CNA", Date != "8/11")
 
+nutrient.full$Station <- revalue(nutrient.full$Station, 
+  c( "Toledo" = "nearshore1", "nearshore" = "nearshore2", "offshore" = "offshore"))
 
-########################### pigment plot #########################
-nutrient.we12$highlight.phyco <- NA 
-nutrient.we12$highlight.phyco[nutrient.we12$Date %in% c("6/16", "7/29", "10/27")] <- 50
+nutrient.full$Station <- factor(nutrient.full$Station, levels = c("nearshore1", "nearshore2", "offshore"))
 
-date.color <- c("6/16" = "#070743", "7/29" = "#169D99", "10/27" = "#B9CC01", rep("gray", 16) )
-
-phyco <- 
-  ggplot(nutrient.we12, aes(x = Date, y = Phycocyanin, group = Station)) +
-    geom_point(size = 1.8, color = "black") +
-    geom_line(size = 0.8, color = "black") +
-    geom_bar(aes(x = Date, y = highlight.phyco, fill = Date), stat = "identity", alpha = .6, show_guide = FALSE) + 
-    scale_fill_manual(values = date.color) +
+makebloomplot <- function(df, yvar) {
+  ggplot(df, aes_string(x = "Date", y = yvar, group = "Station", linetype = "Station")) +
+    geom_line(size = .8) +
     xlab("") + 
-    ylab("ug/L") + 
-    ggtitle("Phycocyanin") +
+    ylab("ug/L") +
+    scale_x_discrete(
+      breaks = c("6/16","7/8", "8/4","9/2", "10/6"),
+      labels = c("Jun", "Jul","Aug", "Sep", "Oct"),
+      drop = FALSE
+    ) +
     theme(
-      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 11, face = "bold"),
-      axis.title.y = element_text(size = 14, face = "bold"),
-      plot.margin = unit(c(0, 0, 0, 0), "cm"),
-      plot.title = element_text(size = 16, face = "bold")
-    )  
+      axis.title.y = element_text(size = 10),
+      panel.grid.major.x = element_blank(),
+      legend.direction = "horizontal",
+      legend.title = element_blank(),
+      legend.key.size = unit(.5, "cm"),
+      plot.margin = unit(c(.3, .3, .3, .3), "cm"),
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9)
+    )
+}
+
+
+
+bloomvars <- c("Phycocyanin", "Chla", "ParMC")
+
+bloomplots <- list()
+
+# Loop through bloomvars and make a ggplot lineplot. Add x-axis to toxin plot, but not others
+for (var in bloomvars) {
+  nutrient.we12 <- filter(nutrient.full, Station == "nearshore1")
   
-
-########################### toxin plot #########################
-nutrient.we12$highlight.toxin <- NA 
-nutrient.we12$highlight.toxin[nutrient.we12$Date %in% c("6/16", "7/29", "10/27")] <- 10
-
-toxin <- 
-  ggplot(nutrient.we12, aes(x = Date, y = ParMC, group = Station)) +
-    geom_line(size = 0.8, color = "black") +
-    geom_point(size = 1.8, color = "black") +
-    geom_bar( aes(x = Date, y = highlight.toxin, fill = Date), stat = "identity", alpha = .6, show_guide = FALSE) + 
-    scale_fill_manual(values = date.color) +
-    xlab("") + 
-    ylab("ug/L") + 
-    ggtitle("Particulate Microcystin") +
-    theme(
-      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 11, face = "bold"),
-      axis.title.y = element_text(size = 14, face = "bold"),
-      plot.title = element_text(size = 16, face = "bold"),
-      plot.margin = unit(c(0, 0, 0, 0), "cm")
-    )  
-
-
-
-########################### Composition Plots ###############################
-erie.toledo <-
-  erie.scale %>%
-    subset_samples(Date %in% c("6/16", "7/29", "10/27") & Station == "Toledo")
-   
-
-erie.toledo <- prune_taxa(taxa_sums(erie.toledo) > 0, erie.toledo)
-
-########################### Phylum Plot ###############################
-toledo.long <-
-  erie.toledo %>%
-  taxglom_and_melt(taxrank = "Phylum", prune = 0.01) %>%
-  order_dates()
-
-# Plot
-phylum <- 
-  ggplot(toledo.long, aes(x = Phylum, y = Abundance, fill = Date, group = Date)) + 
-  geom_bar(
-    stat = "identity",
-    position = "dodge",
-    colour = "black",
-    alpha = .8,
-    show_guide = FALSE
-  ) + 
-  scale_fill_manual(values = c("#070743","#169D99","#B9CC01"), labels = c("Jun 16", "Jul 29", "Oct 27")) +
-  theme(
-    axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1, size = 9, face = "bold"),   
-    axis.title.y = element_text(size = 13, face = "bold"),
-    legend.position = "none",
-    legend.key.size = unit(.5, "cm"),
-    plot.title = element_text(size = 16, face = "bold"),
-    plot.margin = unit(c(0, 1.5, -0.2, 1.5), "cm")
-  ) + 
-  xlab("") +
-  ylab("Rel. Abundance") +
-  ggtitle("Phylum Composition")
-
-########################### Cyano Genus Plot ###############################
-cyanos.long <-
-  erie.toledo %>%
-  taxglom_and_melt(taxrank = "Genus", prune = 0.01) %>%
-  filter(Class == "Cyanobacteria") %>%
-  order_dates()
-
-# Plot 
-cyano.genus <-
-  ggplot(cyanos.long, aes(x = Genus, y = Abundance, fill = Date, group = Date)) + 
-  geom_bar(
-    stat = "identity", 
-    position = "dodge", 
-    colour = "black", 
-    alpha = 1,
-    show_guide = FALSE
-  ) + 
-  scale_fill_manual(values = c("#070743","#169D99","#B9CC01"), labels = c("Jun 16", "Jul 29", "Oct 27")) +
-  theme(
-    axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1, size = 9, face = "bold"),     
-    axis.title.y = element_text(size = 13, face = "bold"),
-    plot.margin = unit(c(0, 1.5, -.2, 1.5), "cm"),
-    plot.title = element_text(size = 16, face = "bold"),
-    legend.position = "none"
-  ) + 
-  xlab("") +
-  ylab("Rel. Abundance") +
-  ggtitle("Cyano Genus Composition")
-
-
-######################## Cyano plot #######################
-erie.cyano <- 
-  erie.scale %>%
-    subset_samples(Station == "Toledo") %>%
-    subset_taxa(Class != "Cyanobacteria") %>%
-    transform_sample_counts(function(x){x/sum(x)}) %>%
-    psmelt() %>%
-    group_by(Phylum, Date) %>%
-    summarise(genAbund = sum(Abundance)) %>%
-    group_by(Phylum) %>%
-    filter(mean(genAbund) > 0.01) %>%
-    order_dates()
-
-cyano.genus <- 
-ggplot(erie.cyano, aes(x = Date, y = genAbund, fill = Phylum)) + 
-  geom_bar(
-    stat = "identity", 
-    position = "stack", 
-    colour = "black", 
-    alpha = 1
-  ) + 
-  scale_fill_brewer(palette = "Set1") + 
-  facet_grid(Phylum~.) + 
-  theme(
-    axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1, size = 9, face = "bold"),     
-    axis.title.y = element_text(size = 13, face = "bold"),
-    plot.margin = unit(c(0, 1.5, -.2, 1.5), "cm"),
-    plot.title = element_text(size = 16, face = "bold"),
-    legend.position = "none"
-  ) + 
-  xlab("") +
-  ylab("Rel. Abundance") +
-  ggtitle("Non-cyano Phylum Composition")
-
-
-########################### Arrange Plots ###############################
-
-g1 <- ggplotGrob(phyco)
-g2 <- ggplotGrob(toxin)
-g3 <- ggplotGrob(cyano.genus)
-g4 <- ggplotGrob(phylum)
-
-ggdraw() +
-  draw_plot(rbind(g1, g2, size = "last"), x = 0.02, y = 0.08, width = .45, height = .9) +
-  draw_plot(rbind(g3, size = "first"), x = 0.47, y = 0.06, width = .53, height = .92) +
-  draw_plot_label(c("A", "B", "C", "D"), c(0.02, 0.02, 0.49, 0.49), c(1, .54, 1, .54), size = 20)
-
-```
-
-**Figure Legend:** A-D: Pigment, toxin, and microbial composition data from Toledo sampling station. Colors of shaded dates in A and B correspond with composition measurements in C and D. The middle date (July 29) was three days before the Toledo water shutoff. C-D: Abundance of Cyanobacteria genera and bacterial Phyla as a fraction of total bacterial reads in a sample. Only genera and Phyla with a relative abundance above 1% in at least one of the three selected dates were included. 
-
-```{r}
-
-nutrient.we12 <- filter(nutrient.we12, Date != "8/11")
-
-phyco <- 
-  ggplot(nutrient.we12, aes(x = Date, y = Phycocyanin, group = Station)) +
-    geom_point(size = 1.8, color = "black") +
-    geom_line(size = 0.8, color = "black") +
-    xlab("") + 
-    ylab("Phycocyanin") + 
-    theme(
-      axis.text.x = element_blank(),
-      axis.title.y = element_text(size = 14, face = "bold"),
-      plot.margin = unit(c(0, 0, 0, 0), "cm")
-    )  
+  plot <- makebloomplot(nutrient.we12, var) + ggtitle(var)
   
-
-########################### toxin plot #########################
-toxin <- 
-  ggplot(nutrient.we12, aes(x = Date, y = ParMC, group = Station)) +
-    geom_line(size = 0.8, color = "black") +
-    geom_point(size = 1.8, color = "black") +
-    xlab("") + 
-    ylab("Toxin") + 
-    theme(
-      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"),    
-      axis.title.y = element_text(size = 14, face = "bold"),
-      plot.margin = unit(c(0, 0, 0, 0), "cm")
-    )  
-
+  ts.legend <- g_legend(plot)
+  
+  plot <- plot + theme(legend.position = "none")
+        
+  bloomplots[[var]] <- plot
+}
 
 ############### cyano ###################
 
+# Create long data frame with Cyano genus relative abundance counts
 erie.cyano <- 
   erie.scale %>%
-    subset_samples(Station == "Toledo") %>%
     transform_sample_counts(function(x){x/sum(x)}) %>%
     subset_taxa(Class == "Cyanobacteria") %>%
     psmelt() %>%
-    group_by(Genus, Date) %>%
+    group_by(Genus, Date, Station) %>%
     summarise(genAbund = sum(Abundance)) %>%
     group_by(Genus) %>%
-    filter(mean(genAbund) > 0.005) %>%
+    filter(mean(genAbund) > 0.0005) %>%
     order_dates()
 
-cyano.genus <- 
-ggplot(erie.cyano, aes(x = Date, y = genAbund, fill = Genus)) + 
-  geom_bar(
-    stat = "identity", 
-    position = "stack", 
-    colour = "black", 
-    alpha = 1
+# GGplot
+plot_cyanogenus <- function(df) {
+  ggplot(df, aes(x = Date, y = genAbund, group = Station)) + 
+  geom_line(size = .8) +
+  ylab("Rel. Abundance") + 
+  scale_y_continuous(limits = c(0, .18)) + 
+  scale_x_discrete(
+      breaks = c("6/16","7/8", "8/4","9/2", "10/6"),
+      labels = c("Jun", "Jul","Aug", "Sep", "Oct"),
+      drop = FALSE
   ) + 
-  scale_fill_brewer(palette = "YlGnBu") + 
-  facet_grid(Genus~.) + 
   theme(
-    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"),     
-    axis.title.y = element_text(size = 13, face = "bold"),
-    plot.margin = unit(c(1, 1.5, -.2, 1.5), "cm"),
-    plot.title = element_text(size = 16, face = "bold"),
+    axis.title.y = element_text(size = 10),
     legend.position = "none",
-    strip.background = element_blank()
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9),
+    plot.margin = unit(c(.3, .3, .3, .3), "cm")
   ) + 
-  xlab("") +
-  ylab("")
+  xlab("") 
+}
 
-####################################
+genusplots <- list()
+cyano.genera <- c("Microcystis", "Synechococcus")
 
-erie.phylum <- 
-  erie.scale %>%
-    subset_samples(Station == "Toledo") %>%
-    transform_sample_counts(function(x){x/sum(x)}) %>%
-    psmelt() %>%
-    group_by(Phylum, Date) %>%
-    summarise(genAbund = sum(Abundance)) %>%
-    group_by(Phylum) %>%
-    filter(mean(genAbund) > 0.01) %>%
-    order_dates()
+for (gen in cyano.genera) {
+  gen.df <- 
+    erie.cyano %>%
+    filter(Station == "nearshore1") %>%
+    filter(Genus == gen)
+  
+  plot <- plot_cyanogenus(gen.df) + ggtitle(gen)
+        
+  genusplots[[gen]] <- plot
+  
+}
+################## Phyco/chla/toxin density plots #####################
 
-phylum.plot <- 
-ggplot(erie.phylum, aes(x = Date, y = genAbund, fill = Phylum)) + 
-  geom_line(
-    stat = "identity", 
-    position = "stack", 
-    colour = "black", 
-    alpha = 1
-  ) + 
-  scale_fill_brewer(palette = "Set1") + 
-  facet_grid(Phylum~.) + 
-  theme(
-    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"),     
-    axis.title.y = element_text(size = 13, face = "bold"),
-    plot.margin = unit(c(0, .5, -.2, .5), "cm"),
-    plot.title = element_text(size = 16, face = "bold"),
-    strip.background = element_blank(),
-    legend.position = "none"
-  ) + 
-  xlab("") +
-  ylab("") 
+densplots.bloom <- list()
+#nutrient.all <- nutrient.full %>% select(Chla, Phycocyanin, ParMC, Station) %>% mutate_each_(funs(log(. + .001)), bloomvars)
+nutrient.newscale <- 
+  nutrient.full %>% 
+    mutate(Chla = ifelse(Chla > 30, 30,
+                  ifelse(Chla < 30, Chla, NA))
+           ) %>%
+    mutate(Phycocyanin = ifelse(Phycocyanin > 30, 30,
+                         ifelse(Phycocyanin < 30, Phycocyanin, NA))
+           ) %>%
+    mutate(ParMC = ifelse(ParMC > 2, 2,
+                         ifelse(ParMC < 2, ParMC, NA))
+           )
+    
+
+for (var in bloomvars) {
+  
+  # Make plot
+  plot <- 
+    ggplot(nutrient.newscale, aes_string(x = var, group = "Station", linetype = "Station")) + 
+    geom_line(stat = "density", size = .8, alpha = .75) + 
+    ggtitle(var) + 
+    ylab("density") +
+    xlab("ug/L") + 
+    theme(
+      axis.text.x = element_text(size = 9, face = "bold"),
+      axis.title.x = element_text(size = 10),
+      legend.position = "none",
+      plot.margin = unit(c(.3, .3, .3, .3), "cm")
+    )
+  
+  if (var == "Phycocyanin" | var == "Chla") {
+    plot <- plot + xlim(0,31)
+  } else if (var == "ParMC") {
+    plot <- plot + xlim(0,2.5)
+  }
+        
+  densplots.bloom[[var]] <- plot
+  
+}
+
+
+################# Microcystis and Synechococcus density plots #############################
+
+densplots.cyano <- list()
+
+for (gen in cyano.genera) {
+  # Filter to genus in dans.gen
+  gen.df <- erie.cyano %>% filter(Genus == gen) #%>% mutate(logAbund = log(genAbund + .001))
+  
+  # Make plot
+  plot <- 
+    ggplot(gen.df, aes(x = genAbund, group = Station, linetype = Station)) + 
+    geom_line(stat = "density", size = .8, alpha = .75) + 
+    ggtitle(gen) +
+    ylab("density") +
+    xlab("Rel. Abundance") + 
+    theme(
+      axis.text.x = element_text(size = 9, face = "bold"),
+      axis.title.x = element_text(size = 10),
+      plot.margin = unit(c(.3, .3, .3, .3), "cm"),
+      legend.direction = "horizontal",
+      legend.title = element_blank(),
+      legend.key.size = unit(.5, "cm")
+    )
+  
+  dens.legend <- g_legend(plot)
+  
+  plot <- plot + theme(legend.position = "none")
+        
+  densplots.cyano[[gen]] <- plot
+  
+}
+
+
 
 
 #################################################
 
+bloomgrobs <- llply(bloomplots, ggplotGrob)
+cyanogrobs <- llply(genusplots, ggplotGrob)
+dens.cyanogrobs <- llply(densplots.cyano, ggplotGrob)
+dens.bloomgrobs <- llply(densplots.bloom, ggplotGrob)
 
-g1 <- ggplotGrob(phyco)
-g2 <- ggplotGrob(toxin)
-g3 <- ggplotGrob(cyano.genus)
-g4 <- ggplotGrob(phylum.plot)
-
-g1 <- gtable_add_cols(g1, g3$widths[6])
-g2 <- gtable_add_cols(g2, g3$widths[6])
+plota <- rbind(do.call("rbind", c(bloomgrobs, size = "last")), do.call("rbind", c(cyanogrobs, size = "last")), size = "last")
+plotb <- rbind(do.call("rbind", c(dens.bloomgrobs, size = "first")), do.call("rbind", c(dens.cyanogrobs, size = "first")), size = "first")
 
 ggdraw() +
-  draw_plot(rbind(g1, g2, g3, size = "last"), x = 0.02, y = 0.02, width = .48, height = .94) +
-  draw_plot(g4, x = 0.51, y = .02, width = .45, height = .94) +
-  draw_plot_label(c("A", "B", "C"), c(0.02, 0.02, .5), c(1, .65, 1), size = 20)
+  draw_plot(cbind(plota, plotb, size = "last"), x = 0.01, y = 0.01, width = .97, height = .94) +
+  draw_plot(dens.legend, x = .75, y = .94, width = .02, height = .05) +
+  draw_plot(ts.legend, x = .25, y = .94, width = .02, height = .05) +
+  draw_plot_label(c("A", "B"), c(0.02, .5), c(1, 1), size = 20) 
+
   
 ```
+**Figure Legend:** A-D: Pigment, toxin, and microbial composition data from Toledo sampling station. Colors of shaded dates in A and B correspond with composition measurements in C and D. The middle date (July 29) was three days before the Toledo water shutoff. C-D: Abundance of Cyanobacteria genera and bacterial Phyla as a fraction of total bacterial reads in a sample. Only genera and Phyla with a relative abundance above 1% in at least one of the three selected dates were included. 
+
 
 <br>
 
@@ -617,21 +512,13 @@ bray.pc.cyanos <- data.frame(
   PC2 = cyanos.internal.pcoa$vectors[ ,2], row.names = NULL
 )
 
-
+# Create a dataframe with sample metadata and sample coordinates on PC1 and PC2 for non-cyanos
 braypc.htrophs.sampledata <- 
   nutrient %>%
     filter(Fraction == "CNA") %>%
     filter(Date != "8/11") %>%
     left_join(bray.pc.htrophs, by = "SampleID")  %>%
     order_dates() 
-
-braypc.htrophs.sampledata$Station <- factor(braypc.htrophs.sampledata$Station, 
-  levels = c("nearshore", "Toledo", "offshore"))
-
-# 9/29 date
-braypc.htrophs.sampledata <- rbind(braypc.htrophs.sampledata, rep(NA, ncol(braypc.htrophs.sampledata)))
-braypc.htrophs.sampledata$Station[nrow(braypc.htrophs.sampledata)] <- "offshore"
-braypc.htrophs.sampledata$Date[nrow(braypc.htrophs.sampledata)] <- "9/29"
 
 
 braypc1.plot <-
@@ -668,20 +555,13 @@ braypc2.plot <-
     plot.margin = unit(c(-0.2, 1.5, 1, 1.5), "cm")
   )
 
-
+# Create a dataframe with sample metadata and sample coordinates on PC1 and PC2 for cyanos
 braypc.cyanos.sampledata <- 
   nutrient %>%
     filter(Fraction == "CNA") %>%
     filter(Date != "8/11") %>%
     left_join(bray.pc.cyanos, by = "SampleID")  %>%
     order_dates() 
-
-braypc.cyanos.sampledata$Station <- factor(braypc.cyanos.sampledata$Station, 
-  levels = c("nearshore", "Toledo", "offshore"))
-
-braypc.cyanos.sampledata <- rbind(braypc.cyanos.sampledata, rep(NA, ncol(braypc.cyanos.sampledata)))
-braypc.cyanos.sampledata$Station[nrow(braypc.cyanos.sampledata)] <- "offshore"
-braypc.cyanos.sampledata$Date[nrow(braypc.cyanos.sampledata)] <- "9/29"
 
 braypc3.plot <-
   ggplot(braypc.cyanos.sampledata, aes(x = Date, y = PC1, group = Station, color = Station)) +
@@ -698,6 +578,7 @@ braypc3.plot <-
     legend.position = "bottom"
   ) 
 
+# Extract the legend
 legend <- gtable_filter(ggplot_gtable(ggplot_build(braypc3.plot)), "guide-box") 
 
 braypc3.plot <- braypc3.plot + guides(color = FALSE)
@@ -713,8 +594,7 @@ braypc4.plot <-
       angle = 45, 
       vjust = 1, 
       hjust = 1, 
-      size = 14, 
-      face = "bold"
+      size = 12
       ), 
     axis.title.y = element_text(size = 14),
     legend.position = "none",
@@ -743,7 +623,7 @@ Percentages on the y-axis labels refer to the relative eigenvalue of the princip
 
 ```{r spearman correlations}
 
-Stations = c("nearshore", "Toledo", "offshore")
+Stations = c("nearshore1", "nearshore2", "offshore")
 
 make_station_braypc <- function(braypc.df, station) {
   station.braypc <-
@@ -757,26 +637,26 @@ make_station_braypc <- function(braypc.df, station) {
 spearman_corr_pc <- function(pc.station, rnames) {
   
   # PC1 tests
-  we2vs12.pc1 <- cor.test(pc.station[["nearshore"]]$PC1, pc.station[["Toledo"]]$PC1, method = "spearman")
-  we2vs4.pc1 <- cor.test(pc.station[["nearshore"]]$PC1, pc.station[["offshore"]]$PC1, method = "spearman")
-  we4vs12.pc1 <- cor.test(pc.station[["Toledo"]]$PC1, pc.station[["offshore"]]$PC1, method = "spearman")
+  we2vs12.pc1 <- cor.test(pc.station[["nearshore2"]]$PC1, pc.station[["nearshore1"]]$PC1, method = "spearman")
+  we2vs4.pc1 <- cor.test(pc.station[["nearshore2"]]$PC1, pc.station[["offshore"]]$PC1, method = "spearman")
+  we4vs12.pc1 <- cor.test(pc.station[["nearshore1"]]$PC1, pc.station[["offshore"]]$PC1, method = "spearman")
   
   # PC2 tests
-  we2vs12.pc2 <- cor.test(pc.station[["nearshore"]]$PC2, pc.station[["Toledo"]]$PC2, method = "spearman")
-  we2vs4.pc2 <- cor.test(pc.station[["nearshore"]]$PC2, pc.station[["offshore"]]$PC2, method = "spearman")
-  we4vs12.pc2 <- cor.test(pc.station[["Toledo"]]$PC2, pc.station[["offshore"]]$PC2, method = "spearman")
+  we2vs12.pc2 <- cor.test(pc.station[["nearshore2"]]$PC2, pc.station[["nearshore1"]]$PC2, method = "spearman")
+  we2vs4.pc2 <- cor.test(pc.station[["nearshore2"]]$PC2, pc.station[["offshore"]]$PC2, method = "spearman")
+  we4vs12.pc2 <- cor.test(pc.station[["nearshore1"]]$PC2, pc.station[["offshore"]]$PC2, method = "spearman")
   
   # Pvalues
   PC1.corr.pvalue <- p.adjust(c(we2vs12.pc1$p.value, we2vs4.pc1$p.value, we4vs12.pc1$p.value), method = "bonferroni")
   PC2.corr.pvalue <- p.adjust(c(we2vs12.pc2$p.value, we2vs4.pc2$p.value, we4vs12.pc2$p.value), method = "bonferroni")
   pc.p <- data.frame(rbind(PC1.corr.pvalue, PC2.corr.pvalue), row.names = c(paste(rnames," PC1"), paste(rnames," PC2")))
-  names(pc.p) <- c("nearshore vs Toledo", "nearshore vs offshore", "Toledo vs offshore")
+  names(pc.p) <- c("nearshore2 vs nearshore1", "nearshore2 vs offshore", "nearshore1 vs offshore")
   
   # Estimates
   PC1.corr.est <- c(we2vs12.pc1$estimate, we2vs4.pc1$estimate, we4vs12.pc1$estimate)
   PC2.corr.est <- c(we2vs12.pc2$estimate, we2vs4.pc2$estimate, we4vs12.pc2$estimate)
   pc.corr <- data.frame(rbind(PC1.corr.est, PC2.corr.est), row.names = c(paste(rnames," PC1"), paste(rnames," PC2")))
-  names(pc.corr) <- c("nearshore vs Toledo", "nearshore vs offshore", "Toledo vs offshore")
+  names(pc.corr) <- c("nearshore2 vs nearshore1", "nearshore2 vs offshore", "nearshore1 vs offshore")
   
   return(list(pval = pc.p, est = pc.corr))
 }
@@ -944,6 +824,7 @@ plot(lm.mode)
 df <- data.frame(days = braypc.htrophs.sampledata$Days[1:50], resid = lm.mode$residuals, station = braypc.htrophs.sampledata$Station[1:50])
 ggplot(df, aes(x = days, y = resid, group = station, color = station)) + geom_line() + ggtitle("PC1~pH model")
 
+
 acf(df$resid)
 pacf(df$resid)
 fit <- arima(df$resid, order = c(4,0,0))
@@ -953,10 +834,10 @@ fit <- arima(df$resid, order = c(4,0,0))
 library(astsa)
 sarima(df$resid, 4, 0, 0)
 
-library(nlme)
-g  <- gls(PC1 ~ pH, data = braypc.htrophs.sampledata[1:50, ], correlation = corARMA(p = 4, q = 0))
+#library(nlme)
+#g  <- gls(PC1 ~ pH, data = braypc.htrophs.sampledata[1:50, ], correlation = corARMA(p = 4, q = 0))
 
-summary(g)
+#summary(g)
 
 ```
 
@@ -976,7 +857,6 @@ cyanos <-
   subset_taxa(Class == "Cyanobacteria")
 
 cyano.otus <- rownames(tax_table(cyanos))
-#titles <- c("Microcystis", "Synechococcus-1", "Pseudanabaena", "Synechococcus-2", "unclassified-1", "Anabaena-1", "Synechococcus-4", "Synechococcus-3", "Anabaena-2", "unclassified-2", "unclassified-3")
 
 scaled.cyanos <- list()
 
@@ -993,7 +873,7 @@ for (otu in cyano.otus) {
   
   cyano.scale <- order_dates(cyano.scale)
   
-  cyano.scale$Station <- factor(cyano.scale$Station, levels = c("offshore", "Toledo", "nearshore"))
+  cyano.scale$Station <- factor(cyano.scale$Station, levels = c("offshore", "nearshore1", "nearshore2"))
   
   scaled.cyanos[[otu]] <- cyano.scale
   
@@ -1070,7 +950,7 @@ braypc.htrophs.sampledata <-
     ) 
 
 
-
+# Function to run deseq2 differential abundance analysis. Takes a phyloseq object and factor column in sample_data as arguments
 heteros_deseq <- function(physeq, var) {
    station.deseq <- phyloseq_to_deseq2(physeq, reformulate(var))
    station.deseq = DESeq(station.deseq, test = "Wald", fitType = "parametric")
@@ -1088,24 +968,28 @@ heteros_deseq <- function(physeq, var) {
    
 }
 
+# Keep OTUs above average relative abundance of 5 reads
 a <- apply(otu_table(erie), MARGIN = 1, function(x) {mean(x)} )
-
 keep <- a > 5
-
 erie.prune <- prune_taxa(keep, erie)
 
 heterotrophs <- 
   erie.prune %>%
     subset_taxa(Phylum != "Cyanobacteria")
 
-sample_data(heterotrophs)$PC1group <- braypc.htrophs.sampledata$PC1group[1:53]
-sample_data(heterotrophs)$PC2group <- braypc.htrophs.sampledata$PC2group[1:53]
+# Add PC1 (bloom) and PC2 (seasonal) groups into phyloseq sample_data. 
+# Exclude missing data point from offshore station on 9/29
+which.na <- which(is.na(braypc.htrophs.sampledata$PC1))
+sample_data(heterotrophs)$PC1group <- braypc.htrophs.sampledata$PC1group[-which.na]
+sample_data(heterotrophs)$PC2group <- braypc.htrophs.sampledata$PC2group[-which.na]
 
+
+# Now, run deseq analyses for each station seperately for both PC1 (high bloom vs low bloom) and PC2 groups (early season vs late season)
 ############################# WE2 ###############################
 
 heteros.we2 <-
   heterotrophs %>%
-    subset_samples(Station == "nearshore")
+    subset_samples(Station == "nearshore2")
 
 pc1.deseq.we2 <- heteros_deseq(heteros.we2, var = "PC1group")
 
@@ -1114,7 +998,7 @@ pc1.deseq.we2 <- heteros_deseq(heteros.we2, var = "PC1group")
 
 heteros.we12 <-
   heterotrophs %>%
-    subset_samples(Station == "Toledo")
+    subset_samples(Station == "nearshore1")
 
 pc1.deseq.we12 <- heteros_deseq(heteros.we12, var = "PC1group")
 
@@ -1143,7 +1027,7 @@ highbloom.gplots <- list()
 #   highbloom.melt <- psmelt(highbloom)
 #   highbloom.melt <- order_dates(highbloom.melt)
 #   
-#   highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "Toledo", "nearshore"))
+#   highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "nearshore1", "nearshore"))
 #   
 #   g1 <- 
 #   ggplot(highbloom.melt, aes(x = Date, y = Station) ) +
@@ -1194,7 +1078,7 @@ for (otu in i) {
   p <- psmelt(sub)
   p <- order_dates(p)
   p$Fraction <- factor(p$Fraction, levels = c("CNA", "100LTR", "53LTR", "3NA", "22NA"))
-  p$Station <- factor(p$Station, levels = c("nearshore", "Toledo", "offshore"))
+  p$Station <- factor(p$Station, levels = c("nearshore2", "nearshore1", "offshore"))
   levels(p$Fraction) <- c("Whole", "100", "53", "3", "0.22")
   
   g1 <- 
@@ -1242,7 +1126,7 @@ for (otu in i) {
   highbloom.melt <- psmelt(highbloom)
   highbloom.melt <- order_dates(highbloom.melt)
   
-  highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "Toledo", "nearshore"))
+  highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "nearshore1", "nearshore2"))
   
   g1 <- 
   ggplot(highbloom.melt, aes(x = Date, y = Station) ) +
@@ -1316,7 +1200,7 @@ for (otu in j) {
   highbloom.melt <- psmelt(highbloom)
   highbloom.melt <- order_dates(highbloom.melt)
   
-  highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "Toledo", "nearshore"))
+  highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "nearshore1", "nearshore2"))
   
   g1 <- 
   ggplot(highbloom.melt, aes(x = Date, y = Station) ) +
@@ -1378,7 +1262,7 @@ for (otu in i) {
   highbloom.melt <- psmelt(highbloom)
   highbloom.melt <- order_dates(highbloom.melt)
   
-  highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "Toledo", "nearshore"))
+  highbloom.melt$Station <- factor(highbloom.melt$Station, levels = c("offshore", "nearshore1", "nearshore2"))
   
   g1 <- 
   ggplot(highbloom.melt, aes(x = Date, y = Station) ) +
@@ -1430,7 +1314,7 @@ p.chao <-
   filter(variable == "Chao1") %>% 
   order_dates()
 
-p.chao$Station <- factor(p.chao$Station, levels = c("nearshore", "Toledo", "offshore"))
+p.chao$Station <- factor(p.chao$Station, levels = c("nearshore2", "nearshore1", "offshore"))
 
 g1 <-
 ggplot(p.chao, aes(x = Date, y = value, group = Station, color = Station)) + geom_line() +
@@ -1449,7 +1333,7 @@ p.invsimp <-
   filter(variable == "InvSimpson") %>%
   order_dates()
 
-p.invsimp$Station <- factor(p.invsimp$Station, levels = c("nearshore", "Toledo", "offshore"))
+p.invsimp$Station <- factor(p.invsimp$Station, levels = c("nearshore2", "nearshore1", "offshore"))
 
 g2 <- 
 ggplot(p.invsimp, aes(x = Date, y = value, group = Station, color = Station)) +   
@@ -1481,7 +1365,7 @@ grid.draw(rbind(g1, g2, size = "first"))
 **Figure Legend:** Chao1 and Inverse Simpson alpha diversity metrics calculated on samples across sampling dates and sites.
 
 # Horner-devine
-```{r}
+```{r, fig.height=5, fig.width=20}
 
 mytaxa = c("Full", "Non-cyano", "Actinobacteria", "Alphaproteobacteria", "Betaproteobacteria", "Bacteroidetes", "Gammaproteobacteria", "Verrucomicrobia")
 
@@ -1526,6 +1410,7 @@ taxa.groups = list(full, noncyano, act, alphaprot, betaprot, bact, gamma, verr)
 chao.list <- list()
 simp.list <- list()
 
+# Function to make an alpha-diversity plot with a linear fit
 alphadivplot <- function(df, i, measure, group) {
   
   df <- 
@@ -1540,7 +1425,7 @@ alphadivplot <- function(df, i, measure, group) {
     scale_color_manual(values = c("#E96446", "#52361b", "#87CEFA")) +
     ylab(measure) +
     ggtitle(group) +
-    #geom_smooth(method = "lm") +
+    geom_smooth(method = "lm") +
     annotate("text", x = 1.45, y = max(df$value) - .03*max(df$value), size = 3, label = paste("P =", signif(summary(lm.fit)$coef[2,4], 5))) 
                      
 }
@@ -1553,8 +1438,6 @@ for (i in 1:8) {
     p$data %>% 
     filter(variable == "Observed") %>% 
     order_dates()
-
-  p.chao$Station <- factor(p.chao$Station, levels = c("nearshore", "Toledo", "offshore"))
   
   chao.list[[i]] <- alphadivplot(p.chao, i, "Observed", mytaxa[i])
   
@@ -1562,8 +1445,6 @@ for (i in 1:8) {
     p$data %>%
     filter(variable == "InvSimpson") %>%
     order_dates()
-
-  p.invsimp$Station <- factor(p.invsimp$Station, levels = c("nearshore", "Toledo", "offshore"))
   
   simp.list[[i]] <- alphadivplot(p.invsimp, i, "InvSimpson", mytaxa[i])
   
@@ -1649,41 +1530,41 @@ cyanos.noscale <-
    subset_taxa(Class == "Cyanobacteria")
    
 
-WE2v12 <- subset_samples(cyanos.noscale, Station %in% c("nearshore", "Toledo"))
+WE2v12 <- subset_samples(cyanos.noscale, Station %in% c("nearshore2", "nearshore1"))
 
 g1 <- 
 make_station_bray_heatmap(
   physeq = WE2v12, 
   range = c(0,1),
-  xlab = "Nearshore",
-  ylab = "Toledo",
-  title = "Toledo vs Nearshore"
+  xlab = "nearshore2",
+  ylab = "nearshore1",
+  title = "nearshore1 vs nearshore2"
 )
 
 g1 <- g1 + theme(legend.position = "none")
 
-WE2v4 <- subset_samples(cyanos.noscale, Station %in% c("nearshore", "offshore") & Date != "9/29")
+WE2v4 <- subset_samples(cyanos.noscale, Station %in% c("nearshore2", "offshore") & Date != "9/29")
 
 g2 <- 
 make_station_bray_heatmap(
   physeq = WE2v4,
   range = c(0,1),
   xlab = "Offshore",
-  ylab = "Nearshore",
-  title = "Nearshore vs Offshore"
+  ylab = "nearshore2",
+  title = "nearshore2 vs offshore"
 )
 
 g2 <- g2 + theme(legend.position = "none")
 
-WE4v12 <- subset_samples(cyanos.noscale, Station %in% c("offshore", "Toledo") & Date != "9/29")
+WE4v12 <- subset_samples(cyanos.noscale, Station %in% c("offshore", "nearshore1") & Date != "9/29")
 
 g3 <- 
 make_station_bray_heatmap(
   physeq = WE4v12,
   range = c(0,1),
-  xlab = "Offshore",
-  ylab = "Toledo",
-  title = "Toledo vs Offshore"
+  xlab = "offshore",
+  ylab = "nearshore1",
+  title = "nearshore1 vs offshore"
 )
 
 
@@ -1707,9 +1588,9 @@ grid.draw(cbind(g1, g2, g3, size = "first"))
 ## S4: heterotroph site vs site bray-curtis heatmaps
 
 ```{r}
-st2 <- subset_samples(erie.scale.format, Station == "nearshore")
+st2 <- subset_samples(erie.scale.format, Station == "nearshore2")
 st4 <- subset_samples(erie.scale.format, Station == "offshore")
-st12 <- subset_samples(erie.scale.format, Station == "Toledo")
+st12 <- subset_samples(erie.scale.format, Station == "nearshore1")
 
 
 
@@ -1726,37 +1607,37 @@ heteros.scale <-
    scale_reads(round = "round") 
 
 
-WE2v12 <- subset_samples(heteros.scale, Station %in% c("nearshore", "Toledo"))
+WE2v12 <- subset_samples(heteros.scale, Station %in% c("nearshore2", "nearshore1"))
 
 g1 <- 
 make_station_bray_heatmap(
   physeq = WE2v12, 
   range = c(.15,.85),
-  xlab = "Nearshore",
-  ylab = "Toledo",
-  title = "Toledo vs Nearshore"
+  xlab = "nearshore2",
+  ylab = "nearshore1",
+  title = "nearshore1 vs nearshore2"
 )
 
-WE2v4 <- subset_samples(heteros.scale, Station %in% c("nearshore", "offshore") & Date != "9/29")
+WE2v4 <- subset_samples(heteros.scale, Station %in% c("nearshore2", "offshore") & Date != "9/29")
 
 g2 <- 
 make_station_bray_heatmap(
   physeq = WE2v4,
   range = c(.15,.85),
-  xlab = "Offshore",
-  ylab = "Nearshore",
-  title = "Nearshore vs Offshore"
+  xlab = "offshore",
+  ylab = "nearshore2",
+  title = "nearshore2 vs offshore"
 )
 
-WE4v12 <- subset_samples(heteros.scale, Station %in% c("offshore", "Toledo") & Date != "9/29")
+WE4v12 <- subset_samples(heteros.scale, Station %in% c("offshore", "nearshore1") & Date != "9/29")
 
 g3 <- 
 make_station_bray_heatmap(
   physeq = WE4v12,
   range = c(.15,.85),
-  xlab = "Offshore",
-  ylab = "Toledo",
-  title = "Toledo vs Offshore"
+  xlab = "offshore",
+  ylab = "nearshore1",
+  title = "nearshore1 vs offshore"
 )
 
 
@@ -1796,9 +1677,6 @@ braypc.htrophs.sampledata <-
     filter(Date != "8/11") %>%
     left_join(bray.pc.htrophs, by = "SampleID")  %>%
     order_dates() 
-
-braypc.htrophs.sampledata$Station <- factor(braypc.htrophs.sampledata$Station, 
-  levels = c("nearshore", "Toledo", "offshore"))
 
 
 braypc1.plot <-
@@ -1841,9 +1719,6 @@ braypc.cyanos.sampledata <-
     filter(Date != "8/11") %>%
     left_join(bray.pc.cyanos, by = "SampleID")  %>%
     order_dates() 
-
-braypc.cyanos.sampledata$Station <- factor(braypc.cyanos.sampledata$Station, 
-  levels = c("nearshore", "Toledo", "offshore"))
 
 
 braypc3.plot <-
@@ -1923,7 +1798,7 @@ Full.long <-
     erie.811 %>%
       subset_samples(Fraction == "CNA") %>%
       taxglom_and_melt(taxrank = "Phylum", prune = 0.02) %>%
-      mutate(Station = revalue(Station, c('WE2' = 'nearshore', 'WE12' = 'Toledo', 'WE4' = 'offshore'))) %>%
+      #mutate(Station = revalue(Station, c('WE2' = 'nearshore', 'WE12' = 'Toledo', 'WE4' = 'offshore'))) %>%
       habs_format() 
       
 
@@ -1951,6 +1826,45 @@ ggplot(Full.long, aes(x = Date, y = Abundance, fill = Phylum)) +
   xlab("") +
   ylab("Relative Abundance (Phyla > 2%) \n") 
         
+```
+
+```{r}
+
+
+erie.phylum <- 
+  erie.scale %>%
+    subset_samples(Station == "nearshore1") %>%
+    transform_sample_counts(function(x){x/sum(x)}) %>%
+    psmelt() %>%
+    group_by(Phylum, Date) %>%
+    summarise(genAbund = sum(Abundance)) %>%
+    group_by(Phylum) %>%
+    filter(mean(genAbund) > 0.01) %>%
+    order_dates()
+
+phylum.plot <- 
+ggplot(erie.phylum, aes(x = Date, y = genAbund, fill = Phylum)) + 
+  geom_line(
+    stat = "identity", 
+    position = "stack", 
+    colour = "black", 
+    alpha = 1
+  ) + 
+  scale_fill_brewer(palette = "Set1") + 
+  facet_grid(Phylum~.) + 
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9, face = "bold"),  
+    axis.title.y = element_text(size = 13, face = "bold"),
+    plot.margin = unit(c(0, .5, -.2, .5), "cm"),
+    plot.title = element_text(size = 16, face = "bold"),
+    strip.background = element_blank(),
+    legend.position = "none"
+  ) + 
+  xlab("") +
+  ylab("") 
+
+
+
 ```
 
 

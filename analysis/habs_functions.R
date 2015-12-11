@@ -23,7 +23,7 @@ habs_format <- function(phy.long){
   
   # Reorder factor levers for stations
   phy.long$Station <- factor(phy.long$Station,
-    levels = c("Toledo", "nearshore", "offshore"))
+    levels = c("nearshore1", "nearshore2", "offshore"))
   
   # Reorder factor levels for Fraction. Change Fraction factor names
   phy.long$Fraction <- factor(phy.long$Fraction, 
@@ -40,7 +40,7 @@ refactor_months_and_stations  <- function(physeq) {
   
   # Refactor stations
   sample_data(physeq)$Station <- factor(sample_data(physeq)$Station,
-    levels = c("nearshore", "Toledo", "offshore"))
+    levels = c("nearshore1", "nearshore2", "offshore"))
 
   # Refactor months
   sample_data(physeq)$Month <- factor(sample_data(physeq)$Month,
@@ -506,7 +506,7 @@ scale_otu_lineplots <- function(physeq) {
   colnames(scaled.otu)[4] <- "Abundance"
   scaled.otu <- order_dates(scaled.otu)
   
-  scaled.otu$Station <- factor(scaled.otu$Station, levels = c("nearshore", "Toledo", "offshore"))
+  scaled.otu$Station <- factor(scaled.otu$Station, levels = c("nearshore1", "nearshore2", "offshore"))
   
   return(scaled.otu)
 } 
@@ -523,4 +523,14 @@ plot_otu_lineplots <- function(df, title) {
       plot.margin = unit(c(1, 1.5, -0.2, 1.5), "cm")
     ) 
   
+}
+
+
+# extracts the legend of a ggplot object 
+# http://stackoverflow.com/questions/12041042/how-to-plot-just-the-legends-in-ggplot2
+g_legend <- function(a.gplot) { 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)
 }
