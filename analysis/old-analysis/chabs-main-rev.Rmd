@@ -1,0 +1,1441 @@
+---
+title: 'Lake Erie HABs Community Ecology Manuscript'
+output:
+  html_document:
+    toc: true
+---
+    
+
+
+
+
+```{r global_options, include=FALSE}
+
+knitr::opts_chunk$set(
+  fig.width = 6, 
+  fig.height = 5, 
+  fig.align = 'center', 
+  fig.path = 'Figs/',
+  warning = FALSE, 
+  message = FALSE
+)
+
+```
+
+
+```{r load libraries}
+
+# Load libraries
+library(phyloseq)
+library(DESeq2)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(gridExtra)
+library(RColorBrewer)
+library(vegan)
+library(magrittr)
+library(knitr)
+library(cowplot)
+library(gtable)
+library(multcompView)
+library(pgirmess)
+library(pander)
+source("~/git_repos/MicrobeMiseq/R/miseqR.R")
+theme_set(theme_bw())
+
+station_colors <- c("#1f78b4", "#33a02c", "#fb9a99")
+```
+
+```{r phyloseq import}
+load("erie-data.RData")
+
+```
+
+```{r metadata import}
+# Import metadata file with nutrients, pigments and toxin
+nutrient <- read.csv("other/nutrient_cleaned.csv")
+
+order_dates <- function(df){
+  df$Date <- factor(df$Date, 
+    levels = c("6/16","6/30","7/8","7/14","7/21",
+      "7/29","8/4","8/11","8/18","8/25","9/2","9/8","9/15",
+      "9/23","9/29","10/6","10/15","10/20","10/27"))
+  return(df)
+}
+
+# Format nutrient data
+nutrient <-
+  nutrient %>%
+    filter(!(Date %in% c("5/27", "6/10", "11/3"))) %>%
+    order_dates() 
+```
+
+
+```{r normalization}
+
+# Scale reads to even depth 
+erie_scale <-
+  erie %>%
+    scale_reads(n = 15000, round = "round") 
+
+
+n = 15000
+thresh = 0.0001
+
+# Prune low abundance taxa using thresh as mean relative abundance
+tax_mean <- taxa_sums(erie_scale)/nsamples(erie_scale)
+erie_scale_0001 <- prune_taxa(tax_mean > thresh*n, erie_scale)
+
+```
+
+## Figure 2: Bloom and Bacterial Composition 
+
+```{r figure2, fig.height=12, fig.width=6}
+
+# Calculate relative abundance of Cyanobacteria at each date
+cyano_abundance <- 
+  erie_scale %>%
+  tax_glom(taxrank = "Phylum") %>%
+  transform_sample_counts(function(x){x/sum(x)}) %>%
+  subset_taxa(Phylum == "Cyanobacteria") %>%
+  psmelt() %>%
+  rename(Cyanobacteria = Abundance) %>%
+  select(Cyanobacteria, Date, Station)
+
+# Merge with Nutrient df
+nutrient_cyano <-
+  nutrient %>%
+    left_join(cyano_abundance, by = c("Station", "Date")) %>%
+    order_dates() %>%
+    mutate(Phyco = ifelse(Phycocyanin > 50, 50, Phycocyanin)) # lower extreme values
+
+
+#################### Lineplots ####################
+
+# Function to create a lineplot given a df and column name
+make_bloomplot <- function(df, yvar, ylab) {
+  ggplot(df, aes_string(x = "Date", y = yvar, group = "Station", color = "Station")) +
+    geom_point(alpha = 0.7, size = 3, shape = 21) +
+    geom_line(alpha = .2, size = 2) + 
+    ylab(ylab) +
+    scale_x_discrete(
+      breaks = c("7/8", "8/4", "9/2", "10/6"),
+      labels = c("Jul", "Aug", "Sep", "Oct"),
+      drop = FALSE
+    ) +
+    scale_color_manual(values = station_colors) + 
+    theme(
+      axis.title.y = element_text(size = 10),
+      axis.title.x = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title = element_text(size = 13, vjust = 1.5),
+      plot.margin = unit(c(.25, 1, .25, .5), "cm"),
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9)
+    )
+}
+
+
+bloom_vars <- c("Phyco", "Chla", "ParMC", "CDOM", "Cyanobacteria")
+bloom_plots <- list()
+
+# Loop through bloomvars and make a ggplot. 
+
+  for (var in bloom_vars) {
+    if (var == "Cyanobacteria") {
+      thisylab <- "Rel. Abundance"
+    } else if (var == "CDOM") {
+      thisylab <- "a305 (m^-1)"
+    } else {
+      thisylab <- "ug/L"
+    }
+    plot <- make_bloomplot(nutrient_cyano, var, thisylab) + ggtitle(var)
+    plot <- plot + theme(legend.position = "none")
+    bloom_plots[[var]] <- plot
+  }
+
+
+
+####################### Compiled Plot ##########################
+
+# Grab the grobs 
+grobs <- llply(bloom_plots, ggplotGrob)
+
+# Plot A: lineplots
+plot <- do.call("rbind", c(grobs, size = "last"))
+
+
+ggdraw() +
+  draw_plot(plot)
+  
+```
+
+# Figure 2 Statistics
+```{r figure2stats}
+
+# Calculate correlation between Chla and phycocyanin for all sites
+cor.test(
+  x = nutrient$Chla, 
+  y = nutrient$Phycocyanin, 
+  alternative = "greater", 
+  method = "pearson"
+)
+
+```
+
+
+<br>
+
+## Figure 3: PCoA
+
+```{r}
+
+
+############################ Cyanos ########################
+
+# Subset to cyanobacteria and scale internally
+cyanos <- 
+  erie %>%
+  subset_taxa(Class == "Cyanobacteria") %>%
+  scale_reads(round = "round")
+
+
+############################ Non-Cyanos ########################
+
+# Subset to cyanobacteria and scale internally
+non_cyanos <- 
+  erie %>%
+  subset_taxa(Class != "Cyanobacteria") %>%
+  scale_reads(round = "round")
+
+###############################################################
+physeq_subsets <- list(erie_scale, cyanos, non_cyanos)
+names(physeq_subsets) <- c("full", "Cyanobacteria", "nc-bacteria")
+
+
+# Generate pcoa scores for each subset
+pcoas <- lapply(physeq_subsets, 
+  function(x) {
+    ordinate(
+      physeq = x,
+      method = "PCoA",
+      distance = "bray"
+    )
+  }
+)
+
+# Fix month factor levels
+sample_data(erie_scale)$Month <- 
+    factor(
+      sample_data(erie_scale)$Month,
+      levels = c("June", "July", "August", "September", "October")
+    ) 
+    
+
+# Flip axis 2
+pcoas$`nc-bacteria`$vectors[ ,2] <- -pcoas$`nc-bacteria`$vectors[ ,2] 
+
+# Generate plots for each subset
+pcoa_plots <- Map(
+  function(x, names) {
+    plot_ordination(
+      physeq = erie_scale,
+      ordination = x,
+      color = "Month",
+      shape = "Station",
+      title = names,
+    ) + 
+    scale_color_manual(
+      values = c("red", "#ffae19", "#4daf4a", "#1919ff", "darkorchid3")
+    ) +
+    geom_point(aes(color = Month), alpha = 0.6, size = 4) +
+    geom_point(colour = "grey90", size = 1.5) +
+    xlab(paste("PC1 ", signif(x$values$Rel_corr_eig[1]*100, 3), "%")) +
+    ylab(paste("PC2 ", signif(x$values$Rel_corr_eig[2]*100, 3), "%"))
+  }, pcoas, names(pcoas)
+)
+
+# extract legend
+g_legend <- function(a.gplot) {
+    tmp <- ggplot_gtable(ggplot_build(a.gplot))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+    legend <- tmp$grobs[[leg]]
+    legend
+}
+legend <- g_legend(pcoa_plots$full)
+
+# Remove legend from plots
+pcoa_plots <- lapply(pcoa_plots, 
+  function(x) {
+    x + theme(legend.position = "none")
+  }
+)
+
+######################### Combine plots ###########################
+ggdraw() +
+  draw_plot(pcoa_plots$full, x = 0, y = 0, width = 0.28, height = 1) + 
+  draw_plot(pcoa_plots$Cyanobacteria, x = 0.28, y = 0, width = 0.28, height = 1) + 
+  draw_plot(pcoa_plots$`nc-bacteria`, x = 0.56, y = 0, width = 0.28, height = 1) +
+  draw_plot(legend, x = 0.88, y = .3, width = 0.1, height = .35) +
+  draw_plot_label(c("A", "B", "C"), c(0, 0.28, 0.56), c(1, 1, 1), size = 20) 
+
+```
+
+
+## PERMANOVA
+
+```{r}
+# Remove dates for which we are missing samples for any of the sites
+permanova_subset <- subset_samples(erie_scale, Date != "9/29")
+
+# Calculate bray-curtis distance
+bdist <- phyloseq::distance(physeq = permanova_subset, method = "bray")
+
+# Convert sample_data to df
+sampledf <- data.frame(sample_data(permanova_subset))
+
+# Run adonis on sampling date
+adonis(bdist ~ Date, data = sampledf)
+beta <- betadisper(bdist, sampledf$Date)
+permutest(beta)
+
+# Run adonis on shore + station 
+adonis(bdist ~ Shore + Station, data = sampledf)
+beta <- betadisper(bdist, sampledf$Shore)
+permutest(beta)
+
+```
+ 
+
+## Figure 4: Cyanobacteria community and OTU dynamics
+```{r figure3, fig.height=12, fig.width=12}
+
+
+############################## Cyano timeseries PC plots ##########################
+
+
+# Determine which PC's exceed broken stick model
+which(pcoas$Cyanobacteria$values$Rel_corr_eig > pcoas$Cyanobacteria$values$Broken_stick)
+
+# Create new data frame with sample metadata and significant PCs
+cyanos_PC_df <- data.frame(
+  SampleID = rownames(pcoas$Cyanobacteria$vectors), 
+  PC1 = pcoas$Cyanobacteria$vectors[ ,1], 
+  PC2 = pcoas$Cyanobacteria$vectors[ ,2], 
+  row.names = NULL
+)
+
+# Create a dataframe with sample metadata and sample coordinates on PC1 and PC2 for cyanos
+cyano_df <- 
+    data.frame(sample_data(erie)) %>%
+    left_join(cyanos_PC_df, by = "SampleID")  %>%
+    order_dates() 
+
+# Function to create a plot of tims(x-axis) vs PC scores (y-axis)
+make_pcts_plot <- function(df, pc, eigs) {
+  ggplot(df, aes_string(x = "Date", y = pc, group = "Station", color = "Station")) +
+      geom_line(size = 1.2) + 
+      scale_color_manual(values = station_colors) +
+      scale_x_discrete(
+        breaks = c("7/8", "8/4", "9/2", "10/6"),
+        labels = c("Jul", "Aug", "Sep", "Oct"),
+        drop = FALSE
+      ) +  
+      ylab(paste(pc, " ", eigs[pc], "%")) +
+      theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(
+          angle = 45, hjust = 1, vjust = 1
+        ),
+        legend.position = "none",
+        plot.margin = unit(c(0, 0.2, 0, 0.2), "cm"),
+        axis.title.y = element_text(size = 13, face = "bold")
+      ) 
+}
+
+cyano_pc <- c("PC1", "PC2")
+cyanoRel_corr_eigs <- signif(pcoas$Cyanobacteria$values$Rel_corr_eig[1:2] *100, 2)
+names(cyanoRel_corr_eigs) <- cyano_pc
+
+cyanos_pc_plots <- list()
+
+# For loop to create PC timeseries plots
+for (pc in cyano_pc) {
+  cyanos_pc_plots[[pc]] <- make_pcts_plot(cyano_df, pc, cyanoRel_corr_eigs)
+}
+
+
+####################### OTU plots #########################
+
+make_otu_plot <- function(df, otu, taxrank) {
+  ggplot(df, aes(x = Date, y = Abundance, group = Station, color = Station)) +
+    geom_line() +
+    ggtitle(paste(df[1, taxrank], otu)) +
+    ylab("rel. abund") + 
+    scale_color_manual(values = station_colors) +
+    scale_x_discrete(
+      breaks = c("7/8", "8/4", "9/2", "10/6"),
+      labels = c("Jul", "Aug", "Sep", "Oct"),
+      drop = FALSE
+    ) +
+    xlab("") + 
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 9),
+      axis.title.y = element_text(size = 8),
+      legend.position = "none",
+      plot.margin = unit(c(0, 0.3, 0, 0.2), "cm"),
+      plot.title = element_text(size = 10, face = "bold")
+    ) 
+}
+
+## Select only cyano OTUs that have mean relative abundace > 0.0001
+n = 15000
+thresh = 0.0001
+
+# Prune low abundance taxa using thresh as mean relative abundance
+tax_mean <- taxa_sums(erie_scale)/nsamples(erie_scale)
+eriePrune.0001 <- prune_taxa(tax_mean > thresh*n, erie_scale)
+
+cyanoOtus <-
+  eriePrune.0001 %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  subset_taxa(Class == "Cyanobacteria") %>%
+  psmelt() %>%
+  order_dates()
+
+cyanoOtuNames <- levels(cyanoOtus$Species)
+
+cyanoOtuPlots <- list()
+
+for (otu in cyanoOtuNames) {
+  df.otu <- filter(cyanoOtus, OTU == otu)
+  cyanoOtuPlots[[otu]] <- make_otu_plot(df = df.otu, otu = otu, taxrank = "Genus")
+}
+
+##################### Compile plots ##########################
+
+# grab grobs for PC plots
+cyanoPcGrobs <- llply(cyanosPcPlots, ggplotGrob)
+
+# Plot A: PC plots
+plota <- do.call("cbind", c(cyanoPcGrobs, size = "first"))
+
+# Plot B: Cyano OTUs
+plotb <- do.call("arrangeGrob", c(cyanoOtuPlots, ncol = 3))
+
+ggdraw() +
+  draw_plot(plota,
+            x = 0.03, y = 0.7, width = .92, height = .26) +
+  draw_plot(plotb, 
+            x = 0.03, y = 0.01, width = .92, height = 0.66) +
+  draw_plot_label(c("A", "B"), c(0.0, 0.0), c(1, 0.72), size = 20) 
+
+```
+
+
+## Table 1: Correlations between station profiles on PC axes
+```{r}
+
+stations = c("nearshore1", "nearshore2", "offshore")
+
+make_station_braypc <- function(braypcDF, station) {
+  stationPC <-
+    braypcDF %>%
+      filter(Date != "9/29") %>%
+      filter(Station == station)
+  
+  return(stationPC)
+}
+
+# Function to run correlation tests
+test_pc_corrs <- function(pcDF, pc, method) {
+  
+  n1Vn2 <- cor.test(pcDF[["nearshore1"]][[pc]], pcDF[["nearshore2"]][[pc]], method = method)
+  n1Vo <- cor.test(pcDF[["nearshore1"]][[pc]], pcDF[["offshore"]][[pc]], method = method)
+  n2Vo <- cor.test(pcDF[["nearshore2"]][[pc]], pcDF[["offshore"]][[pc]], method = method)
+  
+  d <- data.frame(r = c(n1Vn2$estimate, n2Vo$estimate, n1Vo$estimate), 
+                  p = c(n1Vn2$p.value, n2Vo$p.value, n1Vo$p.value),
+                  row.names = c("n1 v n2", "n1 v o", "n2 v o")
+                  )
+  return(d)
+  
+}
+
+
+# Make cyano stations 
+pcCyanoStation <- list()
+
+for (st in stations) {
+  pcCyanoStation[[st]] <- make_station_braypc(cyano_df, st)
+}
+
+cyanosSpearman <- list()
+for (pc in c("PC1", "PC2")) {
+  cyanosSpearman[[pc]] <- test_pc_corrs(
+    pcDF = pcCyanoStation, 
+    pc = pc, 
+    method = "spearman"
+  )
+}
+
+cyanosSpearmanCorrected <- ldply(
+  cyanosSpearman, 
+  function(x) x %>% mutate(p = p.adjust(p, method = "fdr"))
+)
+
+cyanosPearson <- list()
+
+for (pc in c("PC1", "PC2")) {
+  cyanosPearson[[pc]] <- test_pc_corrs(
+    pcDF = pcCyanoStation, 
+    pc = pc, 
+    method = "pearson"
+  )
+}
+
+cyanosPearsonCorrected <- ldply(
+  cyanosPearson, 
+  function(x) x %>% mutate(p = p.adjust(p, method = "fdr"))
+)
+
+cyanosPearsonCorrected$Comparison <- rep(c("N1 v N2", "N1 v O", "N2 v O"), 2)
+
+
+emphasize.strong.cells(which(cyanosPearsonCorrected < 0.05, arr.ind = TRUE))
+pander(cyanosPearsonCorrected)     
+
+```
+
+
+# Figure 4: Heterotroph community and OTU dynamics
+
+
+
+```{r}
+
+# Determine which PC's exceed broken stick model
+which(nonCyanoPcoa$values$Rel_corr_eig > nonCyanoPcoa$values$Broken_stick)
+
+## Create dataframe with PC's that exceed model 
+nonCyanoPC <- data.frame(
+  SampleID = rownames(nonCyanoPcoa$vectors), 
+  PC1 = nonCyanoPcoa$vectors[ ,1], 
+  PC2 = nonCyanoPcoa$vectors[ ,2], 
+  PC3 = -nonCyanoPcoa$vectors[ ,3], 
+  row.names = NULL
+)
+
+# Join PC data with sample metadata
+noncyano_df <- 
+  data.frame(sample_data(erie)) %>%
+    left_join(nonCyanoPC, by = "SampleID")  %>%
+    order_dates() 
+
+
+####################### Plot A #########################
+
+nonCyanoPCs <- c("PC1", "PC2", "PC3")
+nonCyanoRelCorrEigs <- signif(nonCyanoPcoa$values$Rel_corr_eig[1:3] *100, 2)
+names(nonCyanoRelCorrEigs) <- nonCyanoPCs
+
+nonCyanoPCPlots <- list()
+
+# For loop to create PC plots
+for (PC in nonCyanoPCs) {
+  nonCyanoPCPlots[[PC]] <- make_pc_plot(noncyano_df, PC, eigs = nonCyanoRelCorrEigs)
+}
+```
+
+
+
+
+```{r}
+## Differentially abundant OTUs along PCs
+
+# Function to run deseq2 differential abundance analysis. 
+# Takes a phyloseq object and factor column in sample_data as arguments
+# Returns a df with differentially abundant taxa
+get_PC_deseq_OTUs <- function(physeq, var) {
+  
+ station.deseq <- phyloseq_to_deseq2(physeq, reformulate(var))
+ station.deseq = DESeq(station.deseq, test = "Wald", fitType = "parametric")
+
+  res = data.frame(results(station.deseq, cooksCutoff = FALSE))
+  res = data.frame(OTU = row.names(res), res)
+  alpha = 0.05
+  sigtab <-
+    res %>%
+      filter(padj < alpha) 
+
+  sigtab.station = cbind(sigtab, as(tax_table(physeq)[sigtab$OTU, ], "matrix"))
+  
+  return(sigtab.station)
+}
+
+
+# Create factor levels for samples on PCs 
+noncyano_df <-
+  noncyano_df %>%
+    mutate(PC1group = ifelse(PC1 > 0, "2", "1")) %>%
+    mutate(PC2group = ifelse(PC2 > 0, "2", "1")) %>%  
+    mutate(PC3group = ifelse(PC3 > 0, "2", "1"))
+
+# Keep OTUs above average relative abundance of 5 reads
+a <- apply(otu_table(erie), MARGIN = 1, function(x) {mean(x)} )
+keep <- a > 5
+eriePrune <- prune_taxa(keep, erie)
+
+nonCyano <- 
+  eriePrune %>%
+    subset_taxa(Phylum != "Cyanobacteria")
+
+# Add PC groups into phyloseq sample_data.
+sample_data(nonCyano)$PC1group <- noncyano_df$PC1group
+sample_data(nonCyano)$PC2group <- noncyano_df$PC2group
+sample_data(nonCyano)$PC3group <- noncyano_df$PC3group
+
+
+# run deseq analyses for each station seperately for PC1, PC2, PC3
+
+
+################ nearshore1 ###################
+
+nonCyanoN1 <-
+    nonCyano %>%
+      subset_samples(Station == "nearshore1")
+
+pc1DeseqN1 <- get_PC_deseq_OTUs(nonCyanoN1, var = "PC1group")
+pc2DeseqN1 <- get_PC_deseq_OTUs(nonCyanoN1, var = "PC2group")
+pc3DeseqN1 <- get_PC_deseq_OTUs(nonCyanoN1, var = "PC3group")
+
+############################# nearshore2 ###############################
+
+nonCyanoN2 <-
+    nonCyano %>%
+    subset_samples(Station == "nearshore2")
+
+pc1DeseqN2 <- get_PC_deseq_OTUs(nonCyanoN2, var = "PC1group")
+pc2DeseqN2 <- get_PC_deseq_OTUs(nonCyanoN2, var = "PC2group")
+pc3DeseqN2 <- get_PC_deseq_OTUs(nonCyanoN2, var = "PC3group")
+
+
+################# offshore ###############
+nonCyanoO <-
+  nonCyano %>%
+    subset_samples(Station == "offshore")
+
+pc1DeseqO <- get_PC_deseq_OTUs(nonCyanoO, var = "PC1group")
+pc2DeseqO <- get_PC_deseq_OTUs(nonCyanoO, var = "PC2group")
+pc3DeseqO <- get_PC_deseq_OTUs(nonCyanoO, var = "PC3group")
+
+
+```
+
+
+```{r}
+
+############## Plot b #########################
+
+# Filter to results that are positive along PC1
+pc1DeseqN1Pos <- filter(pc1DeseqN1, log2FoldChange > 0)
+pc1DeseqN2Pos <- filter(pc1DeseqN2, log2FoldChange > 0)
+pc1DeseqOPos <- filter(pc1DeseqO, log2FoldChange > 0)
+
+# Find intersection of results from all three sites
+pc1IntersectPos <- intersect(
+  intersect(pc1DeseqN1Pos$Species, pc1DeseqN2Pos$Species),
+  pc1DeseqOPos$Species
+)
+
+nonCyanoOtuPlotsPos <- list()
+
+for (otu in pc1IntersectPos) {
+  otuMelt <-
+  erie_scale %>%
+    transform_sample_counts(function(x){x/sum(x)}) %>%
+    subset_taxa(Species == otu) %>%
+    psmelt() %>%
+    order_dates()
+  
+  nonCyanoOtuPlotsPos[[otu]] <- make_otu_plot(df = otuMelt, otu, taxrank = "Class")
+}
+
+pc1PosTax <- data.frame(tax_table(erie)[pc1IntersectPos, ])
+pc1PosTax$type = rep("PC1-pos", nrow(pc1PosTax))
+```
+
+```{r}
+############## Plot c #########################
+# Filter to results that are positive along PC1
+pc1DeseqN1Neg <- filter(pc1DeseqN1, log2FoldChange < 0)
+pc1DeseqN2Neg <- filter(pc1DeseqN2, log2FoldChange < 0)
+pc1DeseqONeg <- filter(pc1DeseqO, log2FoldChange < 0)
+
+# Find intersection of results from all three sites
+pc1NegIntersect <- intersect(pc1DeseqN1Neg$Species, pc1DeseqN2Neg$Species)
+pc1NegIntersect <- intersect(pc1NegIntersect, pc1DeseqONeg$Species)
+
+nonCyanoOtuPlotsNeg <- list()
+
+for (otu in pc1NegIntersect) {
+  otuMelt <-
+  erie_scale %>%
+    transform_sample_counts(function(x){x/sum(x)}) %>%
+    subset_taxa(Species == otu) %>%
+    psmelt() %>%
+    order_dates()
+  
+  nonCyanoOtuPlotsNeg[[otu]] <- make_otu_plot(df = otuMelt, otu, taxrank = "Class")
+}
+
+pc1NegTax <- data.frame(tax_table(erie)[pc1NegIntersect, ])
+
+pc1NegTax$type = rep("PC1-neg", nrow(pc1NegTax))
+```
+
+
+```{r fig4, fig.height=12, fig.width=12}
+
+## Compile plots
+
+# grab grobs for PC plots
+pcGrobs <- llply(nonCyanoPCPlots, ggplotGrob)
+
+# Plot A: PC plots
+plota <- do.call("cbind", c(pcGrobs, size = "last"))
+
+# Plot B: OTU's that become overabundant during bloom
+plotb <- do.call("arrangeGrob", c(nonCyanoOtuPlotsPos, ncol = 4))
+
+# Plot C: OTU's that are reduced during bloom
+plotc <- do.call("arrangeGrob", c(nonCyanoOtuPlotsNeg, ncol = 4))
+
+ggdraw() +
+  draw_plot(plota,
+            x = 0.03, y = 0.72, width = 0.92, height = 0.25) +
+  draw_plot(plotb, 
+            x = 0.03, y = 0.15, width = 0.92, height = 0.54) +
+  draw_plot(plotc,
+            x = 0.03, y = 0.0, width = 0.92, height = 0.14) +
+  draw_plot_label(c("A", "B", "C"), c(0, 0, 0), c(1, 0.72, 0.16), size = 20) 
+
+
+```
+
+```{r}
+
+# Filter to results that are positive along PC2
+pc2DeseqN1Pos <- filter(pc2DeseqN1, log2FoldChange > 0)
+pc2DeseqN2Pos <- filter(pc2DeseqN2, log2FoldChange > 0)
+pc2DeseqOPos <- filter(pc2DeseqO, log2FoldChange > 0)
+
+# Find intersection of results from all three sites
+pc2IntersectPos <- intersect(
+  intersect(pc2DeseqN1Pos$Species, pc2DeseqN2Pos$Species),
+  pc2DeseqOPos$Species
+)
+
+pc2PosTax <- data.frame(tax_table(erie)[pc2IntersectPos, ])
+pc2PosTax$type = rep("PC2-pos", nrow(pc2PosTax))
+
+# Filter to results that are positive along PC1
+pc2DeseqN1Neg <- filter(pc2DeseqN1, log2FoldChange < 0)
+pc2DeseqN2Neg <- filter(pc2DeseqN2, log2FoldChange < 0)
+pc2DeseqONeg <- filter(pc2DeseqO, log2FoldChange < 0)
+
+# Find intersection of results from all three sites
+pc2IntersectNeg <- intersect(
+  intersect(pc2DeseqN1Neg$Species, pc2DeseqN2Neg$Species),
+  pc2DeseqONeg$Species
+)
+
+pc2NegTax <- data.frame(tax_table(erie)[pc2IntersectNeg, ])
+
+pc2NegTax$type = rep("PC2-neg", nrow(pc2NegTax))
+
+```
+
+```{r}
+# # Filter to results that are positive along PC3
+# pc3DeseqN1Pos <- filter(pc3DeseqN1, log2FoldChange > 0)
+# pc3DeseqN2Pos <- filter(pc3DeseqN2, log2FoldChange > 0)
+# pc3DeseqOPos <- filter(pc3DeseqO, log2FoldChange > 0)
+# 
+# # Find intersection of results from all three sites
+# pc3IntersectPos <- intersect(
+#   intersect(pc3DeseqN1Pos$Species, pc3DeseqN2Pos$Species),
+#   pc3DeseqOPos$Species
+# )
+# 
+# pc3PosTax <- data.frame(tax_table(erie)[pc3IntersectPos, ])
+# 
+# pc3PosTax$type = rep("PC3-pos", nrow(pc3PosTax))
+# 
+# 
+# # Filter to results that are positive along PC3
+# pc3DeseqN1Neg <- filter(pc3DeseqN1, log2FoldChange < 0)
+# pc3DeseqN2Neg <- filter(pc3DeseqN2, log2FoldChange < 0)
+# pc3DeseqONeg <- filter(pc3DeseqO, log2FoldChange < 0)
+# 
+# # Find intersection of results from all three sites
+# pc3IntersectNeg <- intersect(
+#   intersect(pc3DeseqN1Neg$Species, pc3DeseqN2Neg$Species),
+#   pc3DeseqONeg$Species
+# )
+# 
+# pc3NegTax <- tax_table(erie)[pc3IntersectNeg, ]
+# 
+# pc3NegTax
+# 
+# 
+# #deseqTax <- rbind(pc1PosTax, pc1NegTax, pc2PosTax, pc2NegTax, pc3PosTax)
+#deseqTax$all = paste(deseqTax$Phylum,"; ", 
+#                      deseqTax$Class,"; ",
+#                      deseqTax$Order,"; ",
+#                      deseqTax$Family,"; ",
+#                      deseqTax$Genus,"; ",
+#                      deseqTax$Rank7,"; ",
+#                      deseqTax$Rank8,"; ",
+#                      sep = "")
+
+#write.csv(deseqTax, "deseq-taxa.csv")
+
+```
+
+
+```{r}
+
+pcNonCyanoStation <- list()
+
+for (station in Stations) {
+  pcNonCyanoStation[[station]] <- make_station_braypc(noncyano_df, station)
+}
+
+nonCyanosSpearman <- list()
+for (pc in nonCyanoPCs) {
+  nonCyanosSpearman[[pc]] <- test_pc_corrs(
+    pcDF = pcNonCyanoStation, 
+    pc = pc, 
+    method = "spearman"
+  )
+}
+
+nonCyanosSpearmanCorrected <- ldply(nonCyanosSpearman, function(x) x %>% mutate(p = p.adjust(p, method = "fdr")))
+
+nonCyanosPearson <- list()
+
+for (pc in c("PC1", "PC2", "PC3")) {
+  nonCyanosPearson[[pc]] <- test_pc_corrs(
+    pcDF = pcNonCyanoStation, 
+    pc = pc, 
+    method = "pearson"
+  )
+}
+
+nonCyanosPearsonCorrected <- ldply(nonCyanosPearson, function(x) x %>% mutate(p = p.adjust(p, method = "fdr")))
+nonCyanosPearsonCorrected$Comparison <- rep(c("N1 v N2", "N1 v O", "N2 v O"), 3)
+
+emphasize.strong.cells(which(nonCyanosPearsonCorrected < 0.05, arr.ind = TRUE))
+pander(nonCyanosPearsonCorrected, split.tables = Inf)     
+
+
+```
+
+## Table 2: env variables associated with community dissimilarity
+```{r env variables}
+library(leaps)
+
+# Function to run a linear model and return the r-squared and pvalue
+get_lm <- function(vars, response, dat) {
+  formula = reformulate(termlabels = vars, response = response)
+  lm.model <- lm(formula, dat)
+  r <- summary(lm.model)$adj.r.squared
+  p <- summary(lm.model)$coefficients[-1, 4]
+  return(c(r,p))
+}
+
+# Function to extract liner model adj. r-squared and pvalue
+ 
+
+get_bestsub_summary <- function(vars, response, dat) {
+  formula = reformulate(termlabels = vars, response = response)
+  lm.model <- regsubsets(formula, dat)
+  bic <- summary(lm.model)$bic
+  cp <- summary(lm.model)$cp
+  adjr2 <- summary(lm.model)$adjr2
+  best.model <- summary(lm.model)$which[which.min(bic), ]
+  return(list(model = best.model, bic = bic, cp = cp, adjr2 = adjr2))
+}
+
+
+cyanoEnvVars <- c("Nitrate", "SRP", "Temp", "H2O2", "CDOM", "Ammonia", "Turbidity")
+
+nonCyanoEnvVars <- c(
+  "pH", "Turbidity", "Nitrate", "SRP", "DOC", 
+  "Temp", "H2O2", "CDOM", "ParMC", "Chla", "Ammonia"
+)
+
+######### Cyanos PC1 ####################
+lmSimpleCyanoPC1 <- list()
+
+for (var in cyanoEnvVars) {
+  lmSimpleCyanoPC1[[var]] <- get_lm(vars = var, response = "PC1", dat = cyano_df)
+}
+
+########## Cyanos PC2 ######################
+
+lmSimpleCyanoPC2 <- list()
+
+for (var in cyanoEnvVars) {
+  lmSimpleCyanoPC2[[var]] <- get_lm(vars = var, response = "PC2", dat = cyano_df)
+}
+
+########## nonCyanos PC1 ##########################
+lmSimpleNonCyanoPC1 <- list()
+
+for (var in nonCyanoEnvVars) {
+  lmSimpleNonCyanoPC1[[var]] <- get_lm(vars = var, response = "PC1", dat = noncyano_df)
+}
+
+############ nonCyanos PC2 #####################
+lmSimpleNonCyanoPC2 <- list()
+
+for (var in nonCyanoEnvVars) {
+  lmSimpleNonCyanoPC2[[var]] <- get_lm(vars = var, response = "PC2", dat = noncyano_df)
+}
+
+############ nonCyanos PC3 #####################
+lmSimpleNonCyanoPC3 <- list()
+
+
+for (var in nonCyanoEnvVars) {
+  lmSimpleNonCyanoPC3[[var]] <- get_lm(vars = var, response = "PC3", dat = noncyano_df)
+}
+
+
+
+rCyano <- rbind(
+  "Cyano PC1" = as.data.frame.list(lmSimpleCyanoPC1)[1,], 
+  "Cyano PC2" = as.data.frame.list(lmSimpleCyanoPC2)[1,]
+)
+
+rNonCyano <- rbind(
+  "NonCyano PC1" = as.data.frame.list(lmSimpleNonCyanoPC1)[1,],
+  "NonCyano PC2" = as.data.frame.list(lmSimpleNonCyanoPC2)[1,],
+  "NonCyano PC3" = as.data.frame.list(lmSimpleNonCyanoPC3)[1,]
+)
+
+pCyano <- rbind(
+  "Cyano PC1" = as.data.frame.list(lmSimpleCyanoPC1)[2,], 
+  "Cyano PC2" = as.data.frame.list(lmSimpleCyanoPC2)[2,]
+)
+
+pNonCyano <- rbind(
+  "NonCyano PC1" = as.data.frame.list(lmSimpleNonCyanoPC1)[2,],
+  "NonCyano PC2" = as.data.frame.list(lmSimpleNonCyanoPC2)[2,],
+  "NonCyano PC3" = as.data.frame.list(lmSimpleNonCyanoPC3)[2,]
+)
+  
+pCyano <- t(apply(pCyano, 1, function(x) {p.adjust(x, method = "fdr")}))
+emphasize.strong.cells(which(pCyano < 0.05, arr.ind = TRUE))  
+pander(rCyano, split.tables = Inf)
+
+write.csv(round(rbind(pCyano, rCyano), digits = 3), "cyano-lm-results.csv")
+
+pNonCyano <- t(apply(pNonCyano, 1, function(x) {p.adjust(x, method = "fdr")}))
+emphasize.strong.cells(which(pNonCyano < 0.05, arr.ind = TRUE))  
+pander(rNonCyano, split.tables = Inf)
+
+write.csv(round(rbind(pNonCyano, rNonCyano), digits = 3), "noncyano-lm-results.csv")
+
+
+```
+
+
+### Best multivariate model for Principal coordinates   
+```{r}
+# Cyanos
+cyPC1 <- get_bestsub_summary(cyanoEnvVars, "PC1", dat = cyano_df)
+cyPC1
+cyPC1.fit <- lm(reformulate(cyanoEnvVars[cyPC1$model[-1]], "PC1"), data = cyano_df)
+summary(cyPC1.fit)
+
+cyPC2 <- get_bestsub_summary(cyanoEnvVars, "PC2", dat = cyano_df)
+cyPC2
+cyPC2.fit <- lm(reformulate(cyanoEnvVars[cyPC2$model[-1]], "PC2"), data = cyano_df)
+summary(cyPC2.fit)
+
+# NonCyanos
+nonCyPC1 <- get_bestsub_summary(nonCyanoEnvVars, "PC1", dat = noncyano_df)
+nonCyPC1
+nonCyPC1.fit <- lm(reformulate(nonCyanoEnvVars[nonCyPC1$model[-1]], "PC1"), data = noncyano_df)
+summary(nonCyPC1.fit)
+
+nonCyPC2 <- get_bestsub_summary(nonCyanoEnvVars, "PC2", dat = noncyano_df)
+nonCyPC2
+nonCyPC2.fit <- lm(reformulate(nonCyanoEnvVars[nonCyPC2$model[-1]], "PC2"), data = noncyano_df)
+summary(nonCyPC2.fit)
+
+
+noncyano_dfO <- filter(noncyano_df, Station == "offshore")
+
+nonCyPC3 <- get_bestsub_summary(nonCyanoEnvVars, "PC3", dat = noncyano_dfO)
+nonCyPC3
+nonCyPC3.fit <- lm(reformulate(nonCyanoEnvVars[nonCyPC3$model[-1]], "PC3"), data = noncyano_dfO)
+summary(nonCyPC3.fit)
+
+
+
+```
+
+# Figure 6: Alpha diversity
+```{r, fig.height=7, fig.width=13}
+
+
+mytaxa = c("Full", "non-Cyano", "Actinobacteria", "Alphaproteobacteria", "Betaproteobacteria", "Bacteroidetes", "Gammaproteobacteria", "Verrucomicrobia")
+
+############ alpha-proteo #############
+
+act <-
+  erie_scale %>%
+    subset_taxa(Phylum == "Actinobacteria")
+
+alphaprot <-
+  erie_scale %>%
+    subset_taxa(Class == "Alphaproteobacteria")
+
+############ beta-proteo
+betaprot <-
+  erie_scale %>%
+    subset_taxa(Class == "Betaproteobacteria")
+
+############ Bacteroidetes ###########
+bact <-
+  erie_scale %>%
+    subset_taxa(Phylum == "Bacteroidetes")
+
+gamma <-
+  erie_scale %>%
+    subset_taxa(Class == "Gammaproteobacteria")
+
+verr <-
+  erie_scale %>%
+    subset_taxa(Phylum == "Verrucomicrobia")
+
+
+full <- erie_scale
+
+noncyano <- 
+  erie_scale %>%
+    subset_taxa(Class != "Cyanobacteria")
+
+
+taxaGroups = list(full, noncyano, act, alphaprot, betaprot, bact, gamma, verr)
+
+obsList <- list()
+simpList <- list()
+
+# Loop through each taxonomic group and calculate observed richness and ISI
+for (i in 1:8) {
+  
+  alphaDiv <- plot_richness(
+    taxaGroups[[i]], 
+    measures = c("Observed", "InvSimpson")
+  )
+
+  obsRich <- 
+    alphaDiv$data %>% 
+    filter(variable == "Observed")
+
+  obsList[[mytaxa[i]]] <- obsRich
+  
+  invSimp <- 
+    alphaDiv$data %>%
+    filter(variable == "InvSimpson") 
+  
+  simpList[[mytaxa[i]]] <- invSimp
+  
+}
+
+# Function to test whether there is a linear or quadratic relationship 
+# between log chla and alpha diversity of a group
+test_alphadiv_pp <- function(df, model) {
+  
+  df <- 
+    df %>% 
+      select(LogChla, value) %>%
+      na.omit()
+  
+  if (model == "linear") {
+    fit <- lm(value ~ LogChla, data = df)
+  } else if (model == "quadratic") {
+    fit <- lm(value ~ I(LogChla^2), data = df)
+  } 
+  
+  fit.pvalue <- summary(fit)$coef[2,4]
+  fit.r2 <- summary(fit)$r.squared
+  return(fit.pvalue)
+}
+
+# Combine this into one function later
+test_alphadiv_r2 <- function(df, model) {
+  
+  df <- 
+    df %>% 
+      select(LogChla, value) %>%
+      na.omit()
+  
+  if (model == "linear") {
+    fit <- lm(value ~ LogChla, data = df)
+  } else if (model == "quadratic") {
+    fit <- lm(value ~ I(LogChla^2), data = df)
+  } 
+  fit.r2 <- summary(fit)$r.squared
+  return(fit.r2)
+}
+
+
+linearModelsSimp <- 
+  lapply(
+    simpList, 
+    function(x) test_alphadiv_pp(x, model = "linear")
+  ) %>% 
+  unlist() %>%
+  p.adjust(method = "fdr") %>%
+  round(digits = 3)
+
+linearModelsSimpR2 <- 
+  lapply(
+    simpList, 
+    function(x) test_alphadiv_r2(x, model = "linear")
+  ) %>% 
+  unlist() %>%
+  round(digits = 3)
+
+linearModelsObs <- 
+  lapply(
+    obsList, 
+    function(x) test_alphadiv_pp(x, model = "linear")
+  ) %>% 
+  unlist() %>%
+  p.adjust(method = "fdr") %>%
+  round(digits = 3)
+
+quadModelsSimp <- 
+  lapply(
+    simpList, 
+    function(x) test_alphadiv_pp(x, model = "quadratic")
+  ) %>% 
+  unlist() %>%
+  p.adjust(method = "fdr") %>%
+  round(digits = 3)
+
+
+# Function to make an alpha-diversity plot with option for fitted line
+make_alphadiv_plot <- function(df, measure, group, fit, pvalue, r2) {
+  
+  g <- 
+  ggplot(df, aes(x = LogChla, y = value)) + 
+    geom_point() +
+    ylab(measure) +
+    ggtitle(group) 
+  
+  if (pvalue != 0) {
+    g <- g + annotate(
+      "text", 
+      x = 1,
+      y = max(df$value) - 0.03*max(df$value), 
+      size = 3, 
+      label = paste("p =", pvalue)
+      )
+  } else {
+    g <- g + annotate(
+      "text", 
+      x = 1,
+      y = max(df$value) - 0.03*max(df$value), 
+      size = 3, 
+      label = "p < 0.001"
+      )
+  }
+  
+  if (pvalue < 0.05) {
+    g <- g + annotate(
+      "text",
+      x = 1,
+      y = max(df$value) - 0.08*max(df$value),
+      size = 3,
+      label = paste("R2 =", r2),
+    )
+    
+  }
+  
+  
+  if (fit == "linear" & pvalue < 0.05) {
+    g + geom_smooth(method = "lm", size = 1) 
+  } else if (fit == "quadratic") {
+    g + geom_smooth(method = "lm", formula = y ~ poly(x, 2), size = 1) 
+  } else {
+    return(g)
+  }
+                     
+}
+
+
+simpPlots <- list()
+
+for (i in 1:8) {
+  
+    simpPlots[[i]] <- make_alphadiv_plot(
+      df = simpList[[i]], 
+      measure = "InvSimpson", 
+      group = mytaxa[i],
+      fit = "linear",
+      pvalue = linearModelsSimp[i],
+      r2 = linearModelsSimpR2[i]
+    )
+
+}
+
+obsPlots <- list()
+
+for (i in 1:8) {
+  
+    obsPlots[[i]] <- make_alphadiv_plot(
+      df = obsList[[i]], 
+      measure = "Richness", 
+      group = mytaxa[i],
+      fit = "linear",
+      pvalue = linearModelsObs[i],
+      r2 = ""
+    )
+
+}
+
+grid.arrange(
+   obsPlots[[2]], obsPlots[[4]],  obsPlots[[5]], obsPlots[[6]], 
+   simpPlots[[2]], simpPlots[[4]],  simpPlots[[5]], simpPlots[[6]],
+   ncol = 4
+)
+
+
+grid.arrange(
+   obsPlots[[1]], obsPlots[[3]],  obsPlots[[7]], obsPlots[[8]], 
+   simpPlots[[1]], simpPlots[[3]],  simpPlots[[7]], simpPlots[[8]],
+   ncol = 4
+)
+
+
+```
+
+# Microcystis associates
+```{r}
+
+test_htroph_corr <- function(htroph.df, cyano.df, physeq.scale){
+  corr <- cor.test( 
+                   htroph.df,
+                   cyano.df,
+                   method = "spearman"
+                   )
+  
+  pvalue <- corr$p
+  r <- corr$r
+  
+  sig <- which(pvalue < 0.05)
+  otu.names <- colnames(pvalue)[sig]
+  
+  sig.tax <- data.frame(tax_table(physeq.scale))[otu.names,]
+  sig.p <- pvalue[sig]
+  sig.r <- r[sig]
+  sig.dat <- data.frame(sig.p, sig.r, sig.tax)
+  names(sig.dat)[1:2] <- c("pvalue", "r")
+  sig.dat <- arrange(sig.dat, r)
+  sig.dat$Genus <- droplevels(sig.dat$Genus)
+  return(sig.dat)
+}
+
+erie.100 <- subset_samples(erie.subset, Fraction == "100LTR")
+
+# Scale reads to even depth 
+erie_scale100 <-
+  erie.100 %>%
+    scale_reads(n = 15000, round = "round") 
+
+
+n = 15000
+thresh = 0.0001
+
+# Prune low abundance taxa using thresh as mean relative abundance
+tax_mean <- taxa_sums(erie_scale100)/nsamples(erie_scale100)
+erie_scale.0001 <- prune_taxa(tax_mean > thresh*n, erie_scale100)
+
+#
+nonCyanoN1 <- 
+  erie_scale.0001 %>%
+    subset_taxa(Phylum != "Cyanobacteria") %>%
+    subset_samples(Station == "nearshore1") %>% 
+    otu_table(.) %>%
+    t() %>%
+    data.frame()
+    
+nonCyanoN2 <- 
+  erie_scale.0001 %>%
+    subset_taxa(Phylum != "Cyanobacteria") %>%
+    subset_samples(Station == "nearshore2") %>%
+    otu_table(.) %>%
+    t() %>%
+    data.frame()
+
+nonCyanoO <- 
+  erie_scale.0001 %>%
+    subset_taxa(Phylum != "Cyanobacteria") %>%
+    subset_samples(Station == "offshore") %>%
+    otu_table(.) %>%
+    t() %>%
+    data.frame()
+
+
+
+mcN1 <- 
+  erie_scale.0001 %>%
+    subset_taxa(Species == "Otu00005") %>%
+    subset_samples(Station == "nearshore1") %>%
+    otu_table(.) %>%
+    t() %>%
+    data.frame()
+
+ mcN2 <- 
+  erie_scale.0001 %>%
+    subset_taxa(Species == "Otu00005") %>%
+    subset_samples(Station == "nearshore2") %>%
+    otu_table(.) %>%
+    t() %>%
+    data.frame()
+    
+mcO <- 
+  erie_scale.0001 %>%
+    subset_taxa(Species == "Otu00005") %>%
+    subset_samples(Station == "offshore") %>%
+    otu_table(.) %>%
+    t() %>%
+    data.frame()
+
+
+
+# Run spearman correlation test with full community
+corrsPN1 <- list()
+corrsRN1 <- list()
+
+for (i in 1:ncol(nonCyanoN1)) {
+  corrsPN1[[i]] <- cor.test(nonCyanoN1[,i], 
+                            mcN1$Otu00005, method = "spearman")$p.value
+  corrsRN1[[i]] <- cor.test(nonCyanoN1[,i], 
+                            mcN1$Otu00005, method = "spearman")$estimate
+}
+
+#
+corrsPN2 <- list()
+corrsRN2 <- list()
+
+for (i in 1:ncol(nonCyanoN2)) {
+  corrsPN2[[i]] <- cor.test(nonCyanoN2[,i], 
+                            mcN2$Otu00005, method = "spearman")$p.value
+  corrsRN2[[i]] <- cor.test(nonCyanoN2[,i], 
+                            mcN2$Otu00005, method = "spearman")$estimate
+}
+
+corrsPO <- list()
+corrsRO <- list()
+
+for (i in 1:ncol(nonCyanoO)) {
+  corrsPO[[i]] <- cor.test(nonCyanoO[,i], 
+                            mcO$Otu00005, method = "spearman")$p.value
+  corrsRO[[i]] <- cor.test(nonCyanoO[,i], 
+                            mcO$Otu00005, method = "spearman")$estimate
+}
+
+
+
+corrsCorrectedN1 <-
+  corrsPN1 %>%
+    unlist() %>%
+    p.adjust(method = "fdr")
+
+corrsCorrectedN2 <-
+  corrsPN2 %>%
+    unlist() %>%
+    p.adjust(method = "fdr")
+
+corrsCorrectedO <-
+  corrsPO %>%
+    unlist() %>%
+    p.adjust(method = "fdr")
+
+
+w.N1 <- which(corrsCorrectedN1 < 0.05)
+w.N2 <- which(corrsCorrectedN2 < 0.05)
+w.O <- which(corrsCorrectedO < 0.05)
+
+w.int <- intersect(intersect(w.N1, w.N2), w.O)
+
+
+associates <- data.frame(
+  OTU = names(nonCyano.0001)[w.int], 
+  RN1 = unlist(corrsRN1)[w.int],
+  RN2 = unlist(corrsRN2)[w.int],
+  RO = unlist(corrsRO)[w.int]
+)
+
+
+associatesMerge <- left_join(
+  associates, 
+  data.frame(tax_table(erie_scale.0001)), 
+  by = c("OTU" = "Species")
+)
+  
+
+
+
+
+```
+
+# Cyano associates
+```{r}
+n = 15000
+thresh = 0.0001
+
+# Prune low abundance taxa using thresh as mean relative abundance
+tax_mean <- taxa_sums(erie_scale)/nsamples(erie_scale)
+erie_prune_0001 <- prune_taxa(tax_mean > thresh*n, erie_scale)
+
+cyano_otu_prune <-
+  erie_prune_0001 %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  subset_taxa(Class == "Cyanobacteria") 
+
+library(psych)
+
+cyanoCorrsPearson <- corr.test(t(otu_table(cyanoOtuPrune)), use = "pairwise", method = "pearson", adjust = "fdr")
+which(cyanoCorrsPearson$p < 0.05, arr.ind = TRUE)
+
+cyanoCorrsSpearman <- 
+  corr.test(
+    t(otu_table(cyanoOtuPrune)), 
+    use = "complete", 
+    method = "spearman", 
+    adjust = "fdr"
+  )
+
+which(cyanoCorrsSpearman$p < 0.05, arr.ind = TRUE)
+
+write.csv(cyanoCorrsSpearman$r, "cyano-spearman-r.csv")
+write.csv(cyanoCorrsSpearman$p, "cyano-spearman-p.csv")
+
+# Lagged test with syne and microcystis
+cyanoOtusTable <- t(otu_table(cyanoOtuPrune))
+
+cor.test(cyanoOtusTable[-(51:53), 1], cyanoOtusTable[-(1:3), 4], method = "pearson")
+```

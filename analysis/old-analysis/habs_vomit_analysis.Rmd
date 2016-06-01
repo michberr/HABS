@@ -1,0 +1,1241 @@
+da---
+title: "Lake Erie HABs 16 data"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+
+```{r, echo=FALSE,warning=FALSE,message=FALSE}
+#Load libraries
+library(phyloseq)
+packageVersion("phyloseq")
+library(ggplot2)
+library(vegan)
+library(plyr)
+library(scales)
+library(grid)
+library(reshape2)
+theme_set(theme_bw())
+
+# Set working directory
+setwd("~/habs/genomics/data/")
+
+```
+
+## Data import and clean
+```{r}
+### Data import
+
+# mothur import
+
+sharedfile = "mothur/furthestneighbor.shared"
+taxfile = "mothur/furthestneighbor.taxonomy"
+mapfile = "other/metadata_bloom.txt"
+ 
+mothurdata = import_mothur(mothur_shared_file = sharedfile,
+                             mothur_constaxonomy_file = taxfile )
+  # We need to change the taxonomy names
+  tax_table(mothurdata)<-cbind(tax_table(mothurdata),row.names(tax_table(mothurdata)))
+  colnames(tax_table(mothurdata)) <- c("Kingdom","Phylum","Class","Order","Family","Genus","Species")
+  
+  #import mapfile
+  map = import_qiime_sample_data(mapfile)
+  map1 <-map[-1,]
+  colnames(otu_table(mothurdata))<-map1$SampleID
+  moth_merge = merge_phyloseq(mothurdata,map)
+
+  #Filter out shit 
+  moth_good <- subset_samples(moth_merge,Type=="sample")
+  moth_good <- subset_samples(moth_good,Intensive=="n")
+  moth_good <- subset_taxa(moth_good, Kingdom == "Bacteria")
+  moth_good <- subset_taxa(moth_good, Class != "Chloroplast")
+  moth_good <- subset_taxa(moth_good, Family!="mitochondria")
+  moth_good <- prune_taxa(taxa_sums(moth_good)>0,moth_good)
+
+
+
+# Uparse import
+otu <- read.csv("uparse/uparse97.otutable",sep="\t")
+tax <- read.csv("uparse/uparse97_silva80.taxonomy",sep="\t")
+rownames(tax) <- rownames(otu)
+map <- read.csv("other/metadata_bloom.txt",sep="\t")
+rownames(map) <- map$SampleID
+phyOTU <- otu_table(otu,taxa_are_rows=TRUE)
+tax <- as.matrix(tax)
+
+phyTax <- (tax_table(tax))
+phySam <- sample_data(map)
+physeq <- phyloseq(phyOTU,phyTax,phySam)
+
+# Subset out bad samples 
+good_samples <- subset_samples(physeq,Type=="sample" & Intensive =="n")
+
+# Subset out bad taxa. good_chloro retains chloroplasts
+good_chloro <- subset_taxa(good_samples,Kingdom=="Bacteria" & Family!="mitochondria")
+good_chloro <- prune_taxa(taxa_sums(good_chloro)>0,good_chloro)
+good_chloro
+
+# good removes chloroplasts
+good <- subset_taxa(good_chloro,Class!="Chloroplast")
+good <- prune_taxa(taxa_sums(good)>0,good)
+good
+
+
+
+```
+
+```{r,echo=FALSE}
+### all the functions####
+
+##### FUNCTIONS ########
+
+scale_reads <- function(physeq,n){
+  physeq.scale <- transform_sample_counts(physeq, function(x) {(n*x/sum(x))})
+  otu_table(physeq.scale) = floor(otu_table(physeq.scale))
+  physeq.scale = prune_taxa(taxa_sums(physeq.scale)>0,physeq.scale)
+  return(physeq.scale)
+}
+
+order_dates <- function(df){
+  df$Date <- factor(df$Date, levels = c("5/27/14","6/10/14","6/16/14","6/30/14","7/8/14","7/14/14","7/21/14","7/29/14","8/4/14","8/11/14","8/18/14","8/25/14","9/2/14","9/8/14","9/15/14","9/23/14","9/29/14","10/6/14","10/15/14","10/20/14","10/27/14","11/3/14"))
+  return(df)
+}
+
+# Function to run adonis test on a distance object and a categorical variable from a metadata data frame
+doadonis <- function(physeq, category) {
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  bdist<-phyloseq::distance(physeq.scale,"bray")
+  col = as(sample_data(physeq),"data.frame")[,category]
+  adonis.bdist=adonis(bdist~col)
+  print(adonis.bdist) 
+  paste("The Homogeneity of dispersion \n")
+ 
+
+ # Homogeneity of dispersion test
+  betatax=betadisper(bdist,col)
+  p=permutest(betatax)
+  print("The homogeneity of dispersion:") 
+  print(p$tab)
+}  
+
+# Function to make an nmds plot with bray-curtis distance including the scaling step
+make_nmds <- function(physeq,color,shape=NULL,title=NULL){
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
+  physeq.bray.nmds = ordinate(physeq.scale,method="NMDS","bray")
+  cols<- c("#fc8d62","#a6d854","#8da0cb","#66c2a5","#e78ac3")
+ if(!is.null(shape)) {
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = color,shape=shape) + 
+       geom_point(size=5) + theme(legend.key.size= unit(.25,"cm")) + scale_color_continuous(low = "blue",high="orange")
+  } else {
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = color) + 
+       geom_point(size=5) + theme(legend.key.size= unit(.25,"cm"),plot.title=element_text(family="Times", face="bold", size=20))+ scale_color_gradient(low = "blue",high="orange")
+  }
+  if(!is.null(title)) {
+    p <- p + ggtitle(title) 
+  }
+  p
+}
+
+
+make_barplot<-function(physeq,scale,title,colors,ylab){
+  # Agglomerate all otu's by phylum level
+  physeq_phylum<-tax_glom(physeq,taxrank = "Phylum")
+
+  # Create a new phyloseq object which for each sample only includes phyla with a relative abundance above 1 % 
+  physeq_phylum.99 = transform_sample_counts(physeq_phylum, 
+                                              function(x){x/sum(x)})
+  otu_table(physeq_phylum.99)[otu_table(physeq_phylum.99)<scale] <- 0 
+  physeq_phylum.99 = prune_taxa(taxa_sums(physeq_phylum.99)>0,
+                                 physeq_phylum.99)
+
+  # Melt into long format and sort by samplenum and phylum
+  physeq_phylum.long<-psmelt(physeq_phylum.99)
+  physeq_phylum.long<-arrange(physeq_phylum.long,Samplenum,Phylum)
+
+
+  # Reorder factor levels for dates 
+  physeq_phylum.long<-order_dates(physeq_phylum.long)
+
+  # Reorder factor levels for Fraction and Station. Change Fraction factor names
+ physeq_phylum.long$Fraction <- factor(physeq_phylum.long$Fraction,
+                                       levels=c("CNA","100L","22NA"))
+  levels(physeq_phylum.long$Fraction) <- c("Full Community", 
+                                           "Particle/Algal", "Free Living")
+  physeq_phylum.long$Station <-factor(physeq_phylum.long$Station,
+                                      levels=c("WE2","WE12","WE4"))
+
+
+  # GGPLOT it
+  ggplot(physeq_phylum.long,aes(x=Date,y=Abundance,fill=Phylum)) +
+        facet_grid(Fraction~Station,scales="free",space="free")+
+        geom_bar()+
+        geom_bar(stat="identity",position="fill",colour="black",show_guide=FALSE)+ 
+   scale_y_continuous(labels = percent_format())+ 
+  scale_fill_manual(values = colors) + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=50, colour = "black", vjust=1, hjust = 1, size=6.5),
+          axis.text.y = element_text(colour = "black", size=9),
+          axis.title.y = element_text(face="bold", size=16),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=14),
+          legend.text = element_text(size = 13),
+          legend.position="right",
+          strip.text.x = element_text(size=12, face="bold"),
+          strip.text.y = element_text(size=12, face="bold"),
+          strip.background = element_rect(colour="black"))+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=1,keyheight=1))+
+    xlab("")+
+    ylab(ylab)+
+    ggtitle(title)
+        
+}
+
+  
+```
+
+# Pooling samples
+```{r}
+# Make new mapfile for making stacked barplot 
+m<-data.frame(sample_data(moth_good))
+m$PoolID<-paste(m$Date,m$Fraction)
+sample_data(moth_good)<-m
+physeqm<-merge_samples(moth_good,group = "PoolID",fun = mean)
+
+mpool<-data.frame(sample_data(physeqm))
+foo <- data.frame(do.call('rbind', strsplit(as.character(row.names(mpool)),' ',fixed=TRUE)))
+names(foo)<-c("Date","Fraction")
+rownames(foo)<-paste(foo$Date,foo$Fraction)
+sample_data(physeqm)<-foo
+
+
+d<-data.frame(sample_data(moth_good))
+continuous<-subset(d,Station=="WE2")
+contsub<-continuous[,c(3,18:21)]
+contsub.agg<-aggregate(contsub,by=list(contsub$Date),FUN=mean)
+contsub.agg<-contsub.agg[,-2]
+names(contsub.agg)[1]<-"Date"
+s<-data.frame(sample_data(physeqm))
+j<-join(s,contsub.agg,by = "Date")
+row.names(j)<-row.names(s)
+sample_data(physeqm)<-j
+
+# Make barplot
+  physeq_phylum<-tax_glom(physeqm,taxrank = "Phylum")
+
+  # Create a new phyloseq object which for each sample only includes phyla with a relative abundance above 1 % 
+  physeq_phylum.99 = transform_sample_counts(physeq_phylum, 
+                                              function(x){x/sum(x)})
+  otu_table(physeq_phylum.99)[otu_table(physeq_phylum.99)<.02] <- 0 
+  physeq_phylum.99 = prune_taxa(taxa_sums(physeq_phylum.99)>0,
+                                 physeq_phylum.99)
+
+  # Melt into long format and sort by samplenum and phylum
+  physeq_phylum.long<-psmelt(physeq_phylum.99)
+  physeq_phylum.long<-arrange(physeq_phylum.long,Date,Phylum)
+
+
+  # Reorder factor levels for dates 
+  physeq_phylum.long<-order_dates(physeq_phylum.long)
+
+  # Reorder factor levels for Fraction and Station. Change Fraction factor names
+ physeq_phylum.long$Fraction <- factor(physeq_phylum.long$Fraction,levels=c("CNA","100L","22NA"))
+  levels(physeq_phylum.long$Fraction) <- c("Full Community", 
+                                           "Particle/Algal", "Free Living")
+
+  # GGPLOT it
+  ggplot(physeq_phylum.long,aes(x=Date,y=Abundance,fill=Phylum)) +
+        facet_grid(Fraction~.,scales="free")+
+        geom_bar()+
+        geom_bar(stat="identity",position="fill",colour="black",show_guide=FALSE) +
+   scale_y_continuous(labels = percent_format())+ 
+  scale_fill_manual(values = phy) + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=12),
+          axis.text.y = element_text(colour = "black", size=9),
+          axis.title.y = element_text(face="bold", size=16),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=14),
+          legend.text = element_text(size = 13),
+          legend.position="right",
+          strip.text.x = element_text(size=12, face="bold"),
+          strip.text.y = element_text(size=12, face="bold"),
+          strip.background = element_rect(colour="black"))+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=1,keyheight=1))+
+    xlab("")+
+    ylab("Relative Abundance (taxa>2%)")+
+    ggtitle("")
+
+
+```
+
+
+## Sample read counts
+A lot of the 100um samples have very low read counts because a majority of the reads were chloroplasts. Before removing non-bacteria, all samples had at least 10,000 reads, afterwards many of the 100L samples had as few as 500 reads. This is important to keep in mind for beta diversity analyses, because to include all the samples we need to really throw out a lot of data to normalize the sequencing depth. 
+
+```{r,echo=FALSE}
+# Histogram of sample read counts
+ggplot(data.frame(sum=sample_sums(good)),aes(sum)) + geom_histogram(colour="white",fill="indianred")+ggtitle("Sample read counts")+xlab("total sequences")
+
+# mean, max and min of sample read counts
+mins<-min(sample_sums(good))
+paste(c("The minimum sample read count is",mins))
+means<-mean(sample_sums(good))
+paste(c("The mean sample read count is",means))
+maxs<-max(sample_sums(good))
+paste(c("The max sample read count is",maxs))
+```
+
+
+## Stacked bar plots
+
+Note: i filtered out some of the very low abundance taxa to make the plots more readable 
+
+Below is a bar plot of all the samples faceted by filter fraction and station at the phylum level. I first remove phyla that are below 1% in a sample
+```{r,echo=FALSE}
+
+
+ phy <- c(Acidobacteria="#4D4D4D",Actinobacteria="#ff7f00",Armatimonadetes="#ffff99", Bacteroidetes="#6a3d9a",Candidate_division_SR1 ="#b15928" ,Chlorobi="#cab2d6", Chloroflexi="#B2DF8A",Chloroplast="darkgreen",Cyanobacteria="#33A02C",Gemmatimonadetes="#fdbf6f",Planctomycetes="#A6CEE3",Proteobacteria="#1F78B4", unclassified="#fb9a99", Verrucomicrobia ="#e31a1c") 
+
+ 
+make_barplot(physeq = moth_good,scale = .02,title = "", colors = phy, ylab="Relative Abundance (taxa>2%)")
+
+p<-paste(map$Fraction,map$Date)
+map$pool<-p
+
+m<-merge_samples(x = moth_good,"pool")
+make_barplot(physeq=m,scale=.02,title="",colors=phy,ylab="")
+
+
+make_barplot<-function(physeq,scale,title,colors,ylab){
+  # Agglomerate all otu's by phylum level
+  physeq_phylum<-tax_glom(physeq,taxrank = "Phylum")
+
+  # Create a new phyloseq object which for each sample only includes phyla with a relative abundance above 1 % 
+  physeq_phylum.99 = transform_sample_counts(physeq_phylum, 
+                                              function(x){x/sum(x)})
+  otu_table(physeq_phylum.99)[otu_table(physeq_phylum.99)<scale] <- 0 
+  physeq_phylum.99 = prune_taxa(taxa_sums(physeq_phylum.99)>0,
+                                 physeq_phylum.99)
+
+  # Melt into long format and sort by samplenum and phylum
+  physeq_phylum.long<-psmelt(physeq_phylum.99)
+  physeq_phylum.long<-arrange(physeq_phylum.long,Samplenum,Phylum)
+
+
+  # Reorder factor levels for dates 
+  physeq_phylum.long<-order_dates(physeq_phylum.long)
+
+
+
+  # GGPLOT it
+  ggplot(physeq_phylum.long,aes(x=Date,y=Abundance,fill=Phylum)) +
+        facet_grid(~Fraction,scales="free",space="free")+
+        geom_bar()+
+        geom_bar(stat="identity",position="fill",colour="black",show_guide=FALSE)+ 
+   scale_y_continuous(labels = percent_format())+ 
+  scale_fill_manual(values = colors) + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=6.5),
+          axis.text.y = element_text(colour = "black", size=9),
+          axis.title.y = element_text(face="bold", size=16),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=14),
+          legend.text = element_text(size = 13),
+          legend.position="right",
+          strip.text.x = element_text(size=12, face="bold"),
+          strip.text.y = element_text(size=12, face="bold"),
+          strip.background = element_rect(colour="black"))+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=1,keyheight=1))+
+    xlab("")+
+    ylab(ylab)+
+    ggtitle(title)
+        
+}
+                              
+
+```
+
+Lets look at a barplot with chloroplasts included
+```{r}
+
+
+t <- data.frame(tax_table(good_chloro))
+Phylum <- as.character(t$Phylum)
+Class <- as.character(t$Class)
+
+for  (i in 1:length(Class)){ 
+  if (Class[i] == "Chloroplast"){
+      Phylum[i] <- Class[i]
+  } 
+}
+
+t$Phylum <- Phylum
+t <- tax_table(as.matrix(t))
+
+tax_table(good_chloro) <- t
+
+ phy <- c(Acidobacteria="#6d6666",Actinobacteria="#ff7f00",Armatimonadetes="#ffff99", Bacteroidetes="#6a3d9a",Candidate_division_SR1 ="#b15928" ,Chlorobi="#cab2d6", Chloroflexi="#B2DF8A",Chloroplast="darkgreen",Cyanobacteria="#33A02C",Gemmatimonadetes="#fdbf6f",Planctomycetes="#A6CEE3",Proteobacteria="#1F78B4", unclassified="#fb9a99", Verrucomicrobia ="#e31a1c") 
+
+make_barplot(physeq = good_chloro,scale=.02,title = "",colors=phy,ylab="Relative Abundance (taxa>2%)")
+
+```
+
+Below is a bar plot of just the cyanobacteria in each of the samples, broken up by relative composition of cyano OTUs. OTUs were clustered at 97%. TO reduce the complexity of the plot, I eliminated OTUs that accounted for less than 5% of the relative abundance of cyanobacteria
+
+```{r}
+cyano<-subset_samples(physeqm,Fraction=="100L")
+
+
+t<-data.frame(tax_table(cyano))
+cyanotax <- paste(t$Genus, row.names(t))
+
+cy_taxonomy<-cbind(tax_table(cyano),cyanotax)
+
+
+for  (i in 1:nrow(cy_taxonomy)){ 
+  if (cy_taxonomy[i,2] == "Cyanobacteria" & cy_taxonomy[i,6]=="Microcystis"){
+      cy_taxonomy[i,2] <- cy_taxonomy[i,8]
+  } else if (cy_taxonomy[i,2] == "Cyanobacteria" & cy_taxonomy[i,6]!="Microcystis") {
+      cy_taxonomy[i,2]<-cy_taxonomy[i,6]
+    } else {
+    cy_taxonomy[i,2]<-"Z Non-cyano"
+  }
+}
+
+
+cy_taxonomy_phyloseq <-tax_table(as.matrix(cy_taxonomy))
+
+tax_table(cyano)<-cy_taxonomy_phyloseq
+
+ # Agglomerate all otu's by phylum level
+  physeq_phylum<-tax_glom(cyano,taxrank = "Phylum")
+
+  # Create a new phyloseq object which for each sample only includes phyla with a relative abundance above 1 % 
+  physeq_phylum.99 = transform_sample_counts(physeq_phylum, 
+                                              function(x){x/sum(x)})
+  otu_table(physeq_phylum.99)[otu_table(physeq_phylum.99)<.01] <- 0 
+  physeq_phylum.99 = prune_taxa(taxa_sums(physeq_phylum.99)>0,
+                                 physeq_phylum.99)
+
+  # Melt into long format and sort by samplenum and phylum
+  physeq_phylum.long<-psmelt(physeq_phylum.99)
+  physeq_phylum.long<-arrange(physeq_phylum.long,Date,Phylum)
+  names(physeq_phylum.long)[7]<-"CyanoTaxa"
+
+
+  # Reorder factor levels for dates 
+  physeq_phylum.long<-order_dates(physeq_phylum.long)
+
+  # Reorder factor levels for Fraction and Station. Change Fraction factor names
+  
+
+cyano.colors<-c("Anabaena Otu00071" = "magenta", "Anabaena Otu00107"="pink", "Microcystis Otu00002" = "#00b200","Microcystis OTU_8" = "#00b200", "Microcystis OTU_4151" = "#006600", "Microcystis Otu00116"="red","Pseudanabaena Otu00018"="darkorchid4", "Pseudanabaena Otu01105"="#BF5FFF", "Synechococcus Otu00035"="cyan", "Synechococcus Otu00064"="dodgerblue", "Synechococcus Otu00109"="blue4", "Synechococcus Otu04471"="blue4", "unclassified Otu00414"="red", "unclassified Otu00062"="orange", "unclassified Otu00065"="yellow", "unclassified Otu08205"="maroon", "unclassified Otu00475"="red", "unclassified Otu02122"="orange", "Z Non-cyano"="white")
+"#006600"
+moth.colors<-c("maroon","#00b200","darkorchid4","dodgerblue","orange","white")
+
+brewcols<-c(brewer.pal(5,"Set3"),"grey")
+
+mothcols<-c(Anabaena=brewcols[4],"Microcystis Otu00005"=brewcols[1],Pseudanabaena=brewcols[2],Synechococcus="#fdb462",unclassified=brewcols[5],"Z Non-cyano"=brewcols[6])
+  # GGPLOT it
+  ggplot(physeq_phylum.long,aes(x=Date,y=Abundance,fill=CyanoTaxa)) +
+        geom_bar()+
+        geom_bar(stat="identity",position="fill",colour="black",show_guide=FALSE)+
+   scale_y_continuous(labels = percent_format())+
+  scale_fill_manual(values = mothcols,name="CyanoTaxa") + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=10),
+          axis.text.y = element_text(colour = "black", size=9),
+          axis.title.y = element_text(face="bold", size=16),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size = 8),
+          legend.position="right")+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=.7,keyheight=.7))+
+    ylab("Relative Abundance (>1%)")+
+    xlab("")+
+    ggtitle("")
+
+```
+
+stupid cyano plot
+
+```{r}
+cyano<-subset_taxa(good,Phylum=="Cyanobacteria")
+cyano<-subset_samples(cyano,Date=="8/4/14"&Station=="WE12")
+t<-data.frame(tax_table(cyano))
+cyanotax <- paste(t$Genus, row.names(t))
+
+cy_taxonomy<-cbind(tax_table(cyano),cyanotax)
+
+cy_taxonomy_phyloseq <-tax_table(as.matrix(cy_taxonomy))
+
+tax_table(cyano)<-cy_taxonomy_phyloseq
+
+
+  # Create a new phyloseq object which for each sample only includes phyla with a relative abundance above 1 % 
+  cyano.99 = transform_sample_counts(cyano, 
+                                              function(x){x/sum(x)})
+  otu_table(cyano.99)[otu_table(cyano.99)<.01] <- 0 
+  cyano.99 = prune_taxa(taxa_sums(cyano.99)>0,
+                                 cyano.99)
+
+  # Melt into long format and sort by samplenum and phylum
+  cyano.long<-psmelt(cyano.99)
+  cyano.long<-arrange(cyano.long,Samplenum,Phylum)
+ 
+
+
+  # Reorder factor levels for dates 
+  cyano.long<-order_dates(cyano.long)
+
+  # Reorder factor levels for Fraction and Station. Change Fraction factor names
+  cyano.long$Station <-factor(cyano.long$Station,
+                                      levels=c("WE2","WE12","WE4"))
+
+cyano.colors<-c("Anabaena Otu00071" = "magenta", "Anabaena Otu00107"="pink", "Microcystis Otu00002" = "#00b200","Microcystis OTU_8" = "#00b200", "Microcystis OTU_4151" = "#006600", "Microcystis Otu00116"="red","Pseudanabaena Otu00018"="darkorchid4", "Pseudanabaena Otu01105"="#BF5FFF", "Synechococcus Otu00035"="cyan", "Synechococcus Otu00064"="dodgerblue", "Synechococcus Otu00109"="blue4", "Synechococcus Otu04471"="blue4", "unclassified Otu00414"="red", "unclassified Otu00062"="orange", "unclassified Otu00065"="yellow", "unclassified Otu08205"="maroon", "unclassified Otu00475"="red", "unclassified Otu02122"="orange", "Z Non-cyano"="white")
+c<-brewer.pal(12, "Paired")
+
+moth.colors<-c("magenta","#00b200","#006600","darkorchid4","dodgerblue","orange","white")
+  # GGPLOT it
+  ggplot(cyano.long,aes(x=Fraction,y=Abundance,fill=cyanotax)) +
+        geom_bar(stat="identity",position="fill")+ 
+   scale_y_continuous(labels = percent_format())+
+    scale_fill_manual(values=c) + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=50, colour = "black", vjust=1, hjust = 1, size=14),
+          axis.text.y = element_text(colour = "black", size=9),
+          axis.title.y = element_text(face="bold", size=10),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size = 8),
+          legend.position="right")+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=.7,keyheight=.7))+
+    ylab("Relative Abundance (>1%)")+
+    xlab("")+
+    ggtitle("Toledo 8/4/14")
+
+```
+
+
+
+This is interesting. I thought we might see a different microcystis OTU in the second bloom from the first bloom. With clustering at 97% similarity, this isn't the case. I will do some 99% clustering and oligotyping analysis to follow up 
+
+Free-living Phylum-Order-Family level
+
+```{r}
+intensive <- subset_samples(merge,Type=="sample")
+intensive <- subset_samples(intensive,Intensive!="n")
+intensive <- subset_taxa(good_samples, Kingdom == "Bacteria")
+intensive <- subset_samples(intensive,Date=="9/18/14")
+intensive <- prune_taxa(taxa_sums(intensive)>0,intensive)
+
+
+
+
+intensive.colors  <- c("cyan","blue4","yellow","darkgreen", "green",  "orange", "darkorchid4", "red", "grey","maroon", "magenta")
+
+
+ 
+    ggtitle("Top vs Bottom community composition (9/18/14)")
+     
+
+doadonis(intensive,Intensice)
+
+```
+
+## Ordinations and adonis
+
+First, an nmds of all the CNA samples
+```{r,echo=FALSE,message=FALSE}
+
+make_nmds <- function(physeq,color,title=NULL){
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
+  physeq.bray.nmds = ordinate(physeq.scale,method="PCoA","bray")
+  plot_ordination(physeq.scale, physeq.bray.nmds,color = color) + 
+       geom_point(size=3) + theme(legend.key.size= unit(.5,"cm"),plot.title=element_text(face="bold", size=20))+ 
+   scale_colour_gradient(name="Phycocyanin", trans="log",low="black", high="chartreuse") + ggtitle(title)
+  
+}
+
+make_nmds <- function(physeq,color,title=NULL){
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
+  physeq.bray.nmds = ordinate(physeq.scale,method="NMDS","bray")
+  plot_ordination(physeq.scale, physeq.bray.nmds,color = color) + 
+       geom_point(size=3) + theme(legend.key.size= unit(.5,"cm"),plot.title=element_text(face="bold", size=20))+ 
+   ggtitle(title)
+  
+}
+ 
+FCNA<-subset_samples(moth_good,Fraction=="CNA" &Date!="6/10/14")
+make_nmds(physeq = FCNA,color = "Station",shape = "Station",title = "")
+
+make_nmds(physeq = FCNA,color = "Phycocyanin",shape = "Station",title = "Phycocyanin")
+FCNA.scale <- scale_reads(FCNA,min(sample_sums(FCNA)))
+bdist<-phyloseq::distance(FCNA.scale,"bray")
+adonis.bdist<-adonis(bdist~Phycocyanin, as(sample_data(FCNA),"data.frame"))
+print(adonis.bdist) 
+
+physeqm.cna<-subset_samples(physeqm,Fraction=="CNA")
+make_nmds(physeq=physeqm.cna,color="Phycocyanin",title="")
+make_nmds(physeq=physeqm.cna,color="Chla",title="Chla")
+make_nmds(physeq=physeqm.cna,color="Date",title="")
+
+
+make_nmds <- function(physeq,color,shape=NULL,title=NULL){
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
+  physeq.bray.nmds = ordinate(physeq.scale,method="NMDS","bray")
+  cols<- c("#fc8d62","#a6d854","#8da0cb","#66c2a5","#e78ac3")
+ if(!is.null(shape)) {
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = color,shape=shape) + 
+       geom_point(size=3) + theme(legend.key.size= unit(.5,"cm")) + scale_color_manual(values=cols)
+  } else {
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = color) + 
+       geom_point(size=3) + theme(legend.key.size= unit(.5,"cm"),plot.title=element_text(family="Times", face="bold", size=14))+ scale_color_manual(values=cols)
+  }
+  if(!is.null(title)) {
+    p <- p + ggtitle(title) 
+  }
+  p
+}
+
+# Subset to CNA samples
+
+FCNA <- subset_samples(moth_good,Fraction=="CNA")
+set.seed(10)
+make_nmds(FCNA,color ="Station",shape="Station",title = "")
+FCNA.scale <- scale_reads(FCNA,min(sample_sums(FCNA)))
+bdist<-phyloseq::distance(FCNA.scale,"bray")
+adonis.bdist<-adonis(bdist~Bloom, as(sample_data(FCNA),"data.frame"))
+print(adonis.bdist) 
+
+
+
+# 100um
+F100L <- subset_samples(good99,Fraction=="100L")
+set.seed(1)
+make_nmds(F100L,color="Bloom",shape="Station",title = "Algal-associated")
+F100L.scale <- scale_reads(F100L,min(sample_sums(F100L)))
+bdist<-phyloseq::distance(F100L.scale,"bray")
+adonis.bdist<-adonis(bdist~Date+Bloom, as(sample_data(F100L),"data.frame"))
+print(adonis.bdist) 
+
+F22NA <-subset_samples(good99,Fraction=="22NA")
+set.seed(1)
+make_nmds(F22NA,color="Bloom",shape="Station",title = "Free-Living")
+F22NA.scale <- scale_reads(F22NA,min(sample_sums(F22NA)))
+bdist<-phyloseq::distance(F22NA.scale,"bray")
+adonis.bdist<-adonis(bdist~Date+Bloom, as(sample_data(F22NA),"data.frame"))
+print(adonis.bdist) 
+  
+ 
+
+
+# Change between to bloom 1
+bloom <- data.frame(sample_data(good))
+bloom$Bloom[bloom$Bloom=="between"]<-"bloom1"
+
+newbloom<-good
+sample_data(newbloom)<-bloom
+
+
+
+
+set.seed(1)
+FCNA.nobetween<-subset_samples(newbloom,Fraction=="CNA")
+make_nmds(FCNA.nobetween,color="Bloom",shape="Station",title = "")
+doadonis(FCNA.nobetween,"Bloom")
+
+```
+
+
+Here is an adonis test to see how much variation the sampling date can explain
+```{r}
+doadonis(FCNA,"Date")
+
+
+```
+The date that the sample was taken accounts for a large amount of variation in community composition! The test for heterogeneity of dispersion came back non signficant, so we can have more confidence in our adonis result. 
+
+This is an adonis test to see if there are significant differences between the stations even through time. in other words is there a bacterial "signature"" for each station. 
+```{r}
+
+doadonis(FCNA,"Station")
+
+```
+There are significant differences between the stations, but the amount of variation explained is 
+rather small, which makes sense since most of the variation is a result of the date. 
+
+Now, an nmds of the 100um samples for all stations
+```{r}
+# Subset to CNA samples
+F100L <- subset_samples(good,Fraction=="100L")
+
+# Make nmds
+set.seed(1)
+make_nmds(F100L,color = "Bloom",shape = "Station",title = "Lake Erie bacterial community beta diversity (Algal)")
+
+```
+
+
+```{r}
+
+doadonis(F100L,"Date")
+doadonis(F100L,"Station")
+```
+In the 100um fraction, we see roughly the same amount of variation explained temporally as the CNA. Interestingly, we don't see a significant station signature! This makes sense, since the algal blooms are moving dynamically through the stations
+
+
+The first plot is a little hard to read, so here is a separate ordination plot for each station
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# WE2 CNA
+WE2.CNA<-subset_samples(good,Station=="WE2" & Fraction=="CNA")
+make_nmds(WE2.CNA,color = "Date",title = "WE2 Full Community")
+
+# WE2 100um
+WE2.F100L<-subset_samples(good,Station=="WE2" & Fraction=="100L")
+make_nmds(WE2.F100L,color = "Date",title = "WE2 Algal Fraction")
+
+
+```
+
+
+WE2 shows a nice progression of the community through time in the full community samples
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# WE4
+WE4.CNA<-subset_samples(good,Station=="WE4" & Fraction=="CNA")
+make_nmds(WE4.CNA,color = "Date",title = "WE4 Full Community")
+
+w# WE2 100um
+WE4.F100L<-subset_samples(good_samples,Station=="WE4" & Fraction=="100L")
+make_nmds(WE4.F100L,color = "Date",title = "WE4 Algal Fraction")
+
+```
+
+
+WE4 shows a more cyclical progression of the community, where the last date in october seems to return to a similar community as the sample in may
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# WE12 full community
+WE12.CNA<-subset_samples(good_samples,Station=="WE12" & Fraction=="CNA")
+make_nmds(WE12.CNA,color = "Date",title = "WE12 Full Community")
+
+# WE12 algal
+WE12.F100L<-subset_samples(good_samples,Station=="WE12" & Fraction=="100L")
+make_nmds(WE12.F100L,color = "Date",title = "WE12 Algal Fraction")
+
+```
+
+
+WE12 has an interesting shape. The bacterial community during the late september bloom seems to closely resemble the bacterial communitiy during the first bloom in July. The community at the end of the season is different from any other earlier time point. 
+
+
+#### CCA
+
+```{r}
+
+CNA <- subset_samples(moth_good,Fraction=="CNA")
+cna.scale<-scale_reads(CNA,n = 1000)
+cna.scale<-subset_samples(cna.scale,Date!="6/10/14")
+bdist<-phyloseq::distance(physeq = cna.scale,method = "bray")
+  cca.ord<-ordinate(physeq = cna.scale,method = "CCA",distance = bdist,formula = ~Phycocyanin+Chla+ParMC+Nitrate+Ammonia+TDP+Station)
+autoplot(cca.ord)+geom_text(position_jitter())
+plot_ordination(physeq = cna.scale,ordination = cca.ord,color="")
+
+
+
+
+```
+
+
+Make a plot of bray curtis similarity over time for CNA
+```{r}
+
+# Function to grab the bray curtis distance between each timepoint and the first timepoint
+getbdist<-function(physeq){
+  bdist<- phyloseq::distance(physeq,method = "bray")
+  bdist.vec<-as.matrix(bdist)[1,]
+  d<-data.frame(Date=sample_data(physeq)$Date,bdist.vec)
+  return(d)
+}
+
+get.partbdist<-function(physeq){
+  bdist<- phyloseq::distance(physeq,method = "bray")
+  bdist.m<-as.matrix(bdist)[,-1]
+  dists=vector()
+  for(i in 1:ncol(bdist.m)){
+    dists=c(dists,bdist.m[i,i])
+  }
+  d<-data.frame(Date=sample_data(physeq)$Date[-1],dists)
+  return(d)
+}
+
+betadiv_timeseries <- function(physeq.scale,title){
+  physeq.2.scale <-subset_samples(physeq.scale,Station=="WE2")
+  physeq.12.scale <-subset_samples(physeq.scale,Station=="WE12")
+  physeq.4.scale <-subset_samples(physeq.scale,Station=="WE4")
+
+  #  acf
+  a.bdist.2 <- getbdist(physeq.2.scale)
+  a.bdist.4 <- getbdist(physeq.4.scale)
+  a.bdist.12 <- getbdist(physeq.12.scale)
+
+
+  m<-merge(a.bdist.2,a.bdist.4,by="Date",all = TRUE)
+  m<-merge(a.bdist.12,m,by="Date",all=TRUE)
+  names(m) <- c("Date","Station 12","Station 2","Station 4")
+  m.sort<-order_dates(m)
+  m.melt<-melt(m.sort,id.vars = "Date")
+  names(m.melt)<-c("Date","Station","Bray-Curtis from t1")
+
+  # CNA pacf
+  p.bdist.2 <- get.partbdist(physeq.2.scale)
+  p.bdist.4 <- get.partbdist(physeq.4.scale)
+  p.bdist.12 <- get.partbdist(physeq.12.scale)
+
+
+  p.m<-merge(p.bdist.2,p.bdist.4,by="Date",all = TRUE)
+  p.m<-merge(p.bdist.12,p.m,by="Date",all=TRUE)
+  names(p.m) <- c("Date","Station 12","Station 2","Station 4")
+  p.m.sort<-order_dates(p.m)
+  p.m.melt<-melt(p.m.sort,id.vars = "Date")
+  names(p.m.melt)<-c("Date","Station","Bray-Curtis from previous timepoint")
+
+  m.melt.merge<-merge(m.melt,p.m.melt,by.x=c("Date","Station"),by.y=c("Date","Station"),all=TRUE)
+
+  melty<-melt(m.melt.merge,id.vars=c("Date","Station"))
+  names(melty)<-c("Date","Station","BrayType","Dist")
+
+
+  ## GGPLOT
+  ggplot(melty,aes(x=Date,y=Dist,group=Station,color=Station))+ 
+    facet_wrap("BrayType",ncol=1)+
+    geom_point()+geom_line(size=1.3)+ylim(0,1)+
+    ylab("")+
+    xlab("")+
+    ggtitle(title)+
+    theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+ 
+}
+
+
+betadiv_timeseries <- function(physeq.scale,title){
+  physeq.2.scale <-subset_samples(physeq.scale,Station=="WE2")
+  physeq.12.scale <-subset_samples(physeq.scale,Station=="WE12")
+  physeq.4.scale <-subset_samples(physeq.scale,Station=="WE4")
+
+  #  acf
+  a.bdist.2 <- getbdist(physeq.2.scale)
+  a.bdist.4 <- getbdist(physeq.4.scale)
+  a.bdist.12 <- getbdist(physeq.12.scale)
+
+
+  m<-merge(a.bdist.2,a.bdist.4,by="Date",all = TRUE)
+  m<-merge(a.bdist.12,m,by="Date",all=TRUE)
+  names(m) <- c("Date","Station 12","Station 2","Station 4")
+  m.sort<-order_dates(m)
+  m.melt<-melt(m.sort,id.vars = "Date")
+  names(m.melt)<-c("Date","Station","Bray-Curtis from t1")
+
+  # CNA pacf
+  p.bdist.2 <- get.partbdist(physeq.2.scale)
+  p.bdist.4 <- get.partbdist(physeq.4.scale)
+  p.bdist.12 <- get.partbdist(physeq.12.scale)
+
+
+  p.m<-merge(p.bdist.2,p.bdist.4,by="Date",all = TRUE)
+  p.m<-merge(p.bdist.12,p.m,by="Date",all=TRUE)
+  names(p.m) <- c("Date","Station 12","Station 2","Station 4")
+  p.m.sort<-order_dates(p.m)
+  p.m.melt<-melt(p.m.sort,id.vars = "Date")
+  names(p.m.melt)<-c("Date","Station","Bray-Curtis from previous timepoint")
+
+  m.melt.merge<-merge(m.melt,p.m.melt,by.x=c("Date","Station"),by.y=c("Date","Station"),all=TRUE)
+
+  melty<-melt(m.melt.merge,id.vars=c("Date","Station"))
+  names(melty)<-c("Date","Station","BrayType","Dist")
+
+
+  ## GGPLOT
+  ggplot(melty,aes(x=Date,y=Dist))+ 
+    facet_wrap("BrayType",ncol=1)+
+    geom_boxplot()+ylim(0,1)+
+    ylab("")+
+    xlab("")+
+    ggtitle(title)+
+    theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10),
+          strip.text.x=element_text(size=14),
+          strip.text.y=element_text(size=14))
+ 
+}
+# Full community samples
+FCNA<-subset_samples(moth_good,Fraction=="CNA")
+cna.scale<-scale_reads(FCNA,min(sample_sums(FCNA)))
+
+betadiv_timeseries(physeq.scale = cna.scale,title = "Full Community Beta Diversity Time Series")
+
+
+## Look at 100um fraction
+F100L<-subset_samples(moth_good,Fraction=="100L")
+F100L.scale<-scale_reads(F100L,min(sample_sums(F100L)))
+betadiv_timeseries(physeq.scale = F100L.scale,title = "Particle-associated Bacteria Beta Diversity Time Series")
+
+## Look at .22um fraction
+F22na <- subset_samples(moth_good,Fraction=="22NA")
+F22na.scale<-scale_reads(F22na,min(sample_sums(F22na)))
+betadiv_timeseries(physeq.scale = F22na.scale,title = "Free-Living Bacteria Beta Diversity Time Series")
+
+mc<-tax_glom(good99,taxrank = "Genus")
+mc<-subset_samples(mc,Fraction=="100L")
+mc.scale<-transform_sample_counts(mc,function(x) {(x/sum(x))})
+mcabund<-t(otu_table(mc.scale)[4,])
+mcabund<-data.frame(mcabund)
+names(mcabund)<-"Microcystis"
+log_mcabund<-log(mcabund)
+
+linear<-data.frame(log_mcabund,)
+
+ggplot(log_mcabund,aes(x=Microcystis))+geom_histogram(color="white",fill="indianred")
+
+fit.1<-lm()
+
+```
+
+#### Alpha diversity #####
+
+```{r}
+cna.scale<-scale_reads(CNA,min(sample_sums(CNA)))
+CNA <-subset_samples(moth_good,Fraction=="CNA")
+F100L <-subset_samples(moth_good,Fraction=="100L")
+F22NA <-subset_samples(moth_good,Fraction=="22NA")
+
+fraction<-FCNA
+# CNA
+evenness = matrix(nrow=nsamples(fraction),ncol=100)
+row.names(evenness) <- sample_names(fraction)
+
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(3)
+
+# For 100 replications, rarefy the OTU table to 1000 reads and store the richness and evennes estimates. The default for the rarefy_even_depth command is to pick with replacement so I set it to false. Picking without replacement is more computationally intensive 
+for (i in 1:100) {
+  r=rarefy_even_depth(fraction,min(sample_sums(fraction)),verbose=FALSE,replace = FALSE)
+  even= as.numeric(as.matrix(estimate_richness(r,measures="Observed")))
+  evenness[,i]=even
+}
+
+
+# Create a new matrix to hold the means and standard deviations of the evenness estimates
+even.stats = matrix(nrow=nsamples(fraction),ncol=2)
+even.stats[,1] = apply(evenness,1,mean)
+even.stats[,2] = apply(evenness,1,sd)
+
+even.stats = data.frame(row.names(evenness),even.stats)
+colnames(even.stats) = c("samples","mean","sd")
+
+m<-merge(even.stats,data.frame(sample_data(fraction)),by.x="samples",by.y="SampleID")
+m=m[,1:6]
+m.sort<-order_dates(m)
+
+m.richness<-m.sort
+m.even<-m.sort
+
+names(m.richness)[2]<-"Richness"
+names(m.even)[2]<-"Evenness"
+
+combined<-cbind(m.richness,Evenness=m.even$Evenness)
+combined<-combined[,c(2,5,6,7)]
+combined.melt<-melt(combined,id.vars=c("Date","Station"))
+combined.melt<-order_dates(combined.melt)
+
+alpha<-read.table("alphadiv")
+
+ggplot(alpha,aes(x=Date,y=mean,group=Station,color=Station))+geom_point()+geom_line(size=1.3)+ylab("Observed Richness")+ggtitle("Free-living")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+
+alpha<-order_dates(alpha)
+
+
+ggplot(alpha,aes(x=Date,y=value,fill=variable))+geom_boxplot()+facet_grid(variable~.,scales="free")+ylab("")+xlab("")+ggtitle("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10),
+        strip.text.x = element_text(size=14, face="bold"),
+        strip.text.y = element_text(size=14, face="bold"),
+        strip.background = element_rect(colour="black"))
+
+alpha<-order_dates(alpha)
+alpha$Station<-factor(alpha$Station,levels = c("WE2","WE4","WE12"))
+ggplot(alpha,aes(x=Date,y=value,color=Station,group=Station,shape=Station))+geom_point()+geom_line()+facet_wrap(~variable,scales="free",ncol=1)+ylab("")+xlab("")+ggtitle("")+scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+  theme(axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=10),
+        strip.text.x = element_text(size=14, face="bold"),
+        strip.text.y = element_text(size=14, face="bold"),
+        strip.background = element_rect(colour="black"))
+
+cols<-c
+
+m.sort
+cna.alpha<-data.frame(m.sort,Phycocyanin=sample_data(CNA)$Phycocyanin)
+cna.fit<-lm(formula = mean~Phycocyanin,data=cna.alpha)
+summary(cna.fit)
+
+f100.alpha<-data.frame(m.sort,Phycocyanin=sample_data(F100L)$Phycocyanin)
+f100.fit<-lm(formula = mean~Phycocyanin,data=f100.alpha)
+summary(f100.fit)
+
+f22.alpha <-data.frame(m.sort,Phycocyanin=sample_data(F22NA)$Phycocyanin)
+f22.fit<-lm(formula = mean~Phycocyanin,data=f22.alpha)
+summary(f22.fit)
+
+alpha.even<-alpha[58:114,]
+alpha.rich<-alpha[1:58,]
+
+even.agg<-aggregate(alpha.even,by=list(alpha.even$Date),FUN=mean)
+even.agg<-even.agg[,c(1,5)]
+names(even.agg)<-c("Date","Evenness")
+rich.agg<-aggregate(alpha.rich,by=list(alpha.rich$Date),FUN=mean)
+rich.agg<-rich.agg[,c(1,5)]
+names(rich.agg)<-c("Date","Richness")
+plz<-join(even.agg,rich.agg,by="Date")
+
+phy.dat<-data.frame(Phycocyanin=data.frame(sample_data(physeqm.cna))$Phycocyanin,Date=data.frame(sample_data(physeqm.cna))$Date)
+plz.2<-join(plz,phy.dat,by="Date")
+plz.2$logphyco=log2(plz.2$Phycocyanin)
+lm.1<-lm(Evenness~Phycocyanin,data=plz.2)
+summary(lm.1)
+
+lm.2<-lm(Richness~Phycocyanin,data=plz.2)
+summary(lm.2)
+
+
+```
+
+### Abundance plots of random forest OTUs ####
+```{r}
+cna.scale<-scale_reads(CNA,min(sample_sums(CNA)))
+F100L <- subset_samples(good, Fraction=="100L")
+F100L.scale <- scale_reads(F100L,min(sample_sums(F100L)))
+
+c<-cor(x = t(otu_table(F100L.scale)))
+c<-data.frame(c)
+nontox<-c$Otu08291
+names(nontox)<-names(c)
+d<-data.frame(tax_table(F100L.scale))
+merg<-merge(d,nontox,by="row.names")
+names(merg)[1]<-"OTU"
+merg<-arrange(merg,y)
+asso<-merg[723:729,1]
+asso<-asso[-c(4,2,1)]
+
+mc <- F100L.scale
+tax_table(mc)<-cbind(tax_table(mc),row.names(tax_table(mc)))
+mc<-subset_taxa(mc, V7 %in% c(asso))
+
+
+melt.mc.2<-psmelt(mc)
+melt.mc.2.sort<-order_dates(melt.mc.2)
+
+#melt.mc.2.sort$ParMC<-as.numeric(as.vector(melt.mc.2.sort$ParMC))
+
+
+
+#otucol<- brewer.pal(8,"Set2")
+#names(otucol)<-c("Otu00002","Otu00015","Otu00020","Otu00035","Otu00088","Otu00147","Otu00004") 
+
+ggplot(melt.mc.2.sort,aes(x=Date,y=Abundance,group=V7,color=V7))+facet_grid(Station~.)+geom_point()+geom_line(size=1.3)+scale_color_brewer(palette = "Set2")+scale_y_continuous(trans=log2_trans())+ylab("log Abundance")+ggtitle("")+xlab("")+theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+
+```
+
+# Microcystin plot
+```{r}
+
+map<-data.frame(map)
+mapsub<-subset(map,map$Fraction=="22NA")
+mapsub$ParMC<-as.numeric(as.matrix(mapsub$ParMC))
+
+mc_data<-mapsub[-c(3,4),]
+mc_data_noint<-mc_data[mc_data$Intensive == "n",]
+mc_data_noint<-order_dates(mc_data_noint)
+mc_data_noint$Station<-factor(mc_data_noint$Station, levels=c("WE2","WE4","WE12"))
+
+ggplot(mc_data_noint,aes(x=Date,y=ParMC),col = "red")+geom_boxplot(fill = "white", colour = "darkgreen")+ylab("Particulate Microcystin")+ggtitle("")+xlab("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+ 
+
+ggplot(mc_data_noint,aes(x=Date,y=Chla,group=Station,color=Station))+geom_point()+geom_line(size=1.3)+ylab("ChlA (ug/L)")+ggtitle("")+xlab("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+
+p1 <- ggplot(mc_data_noint,aes(x=Date,y=Phycocyanin,group=Station,shape=Station,color=Station))+geom_point(size=2)+ scale_shape(solid = FALSE)+geom_line()+ylab("Phycocyanin (ug/L)")+ggtitle("")+xlab("")+scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+  theme(axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=10))
+
+p2 <- ggplot(mc_data_noint,aes(x=Date,y=Chla,group=Station,shape=Station,color=Station))+geom_point(size=2)+ scale_shape(solid = FALSE)+geom_line()+ylab("Chlorophyll A (ug/L)")+ggtitle("")+xlab("")+scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+  theme(axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=10))
+
+p3 <- ggplot(mc_data_noint,aes(x=Date,y=ParMC,group=Station,shape=Station,color=Station))+geom_point(size=2)+ scale_shape(solid = FALSE)+geom_line()+ylab("Particulate Microcystin (ug/L)")+ggtitle("")+xlab("")+scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+  theme(axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=10))
+
+p4 <- ggplot(mc_data_noint,aes(x=Date,y=DissMC,group=Station,shape=Station,color=Station))+geom_point(size=2)+ scale_shape(solid = FALSE)+geom_line()+ylim(c(0,2))+ylab("Dissolved Microcystin (ug/L)")+ggtitle("")+xlab("")+scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+  theme(axis.text.x = element_text(angle=45, colour = "black", vjust=1, hjust = 1, size=10))
+
+
+
+multiplot(p1,p2,p3,ncol=2, layout=matrix(c(1,2,3,3), nrow=2, byrow=TRUE))
+
+grid_arrange_shared_legend(p1,p2,p3,p4,ncol=2 )
+
+ggplot(mc_data_noint,aes(x=Date,y=Phycocyanin))+geom_boxplot()+ylab("Phycocyanin (ug/L)")+ggtitle("Phycocyanin")+xlab("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+
+ggplot(mc_data_noint,aes(x=Date,y=Chla,group=Station,color=Station))+facet_grid(Station~.,scales="free")+geom_point()+geom_line(size=1.3)+ylab("Chla (ug/L)")+ggtitle("Chlorophyll A")+xlab("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+
+ggplot(mc_data_noint,aes(x=Date,y=ParMC,group=Station,color=Station))+facet_grid(Station~.,scales="free")+geom_point()+geom_line(size=1.3)+ylab("ParMC (ug/L)")+ggtitle("Particulate Microcystin")+xlab("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=10))
+
+mm<-mc_data_noint[,c(3,5,21,20,18)]
+mm.melt<-melt(mm,id.vars = c("Date","Station"))
+mm.melt<-order_dates(mm.melt)
+
+ggplot(mm.melt,aes(x=Date,y=value,group=Station,color=Station))+geom_point()+geom_line(size=1.3)+scale_y_continuous(trans=log2_trans())+facet_grid(variable~.,scales="free")+ggtitle("")+xlab("")+ylab("")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=14),
+        strip.text.x = element_text(size=12, face="bold"),
+        strip.text.y = element_text(size=12, face="bold"),
+        strip.background = element_rect(colour="black")) # Black rectangle around facet title
+
+ggplot(mm.melt,aes(x=Date,y=value,fill=variable))+geom_boxplot()+facet_grid(variable~.,scales="free")+ggtitle("")+xlab("")+ylab("ug/L (logscale)")+
+  theme(axis.text.x = element_text(angle=30, colour = "black", vjust=1, hjust = 1, size=12),
+        strip.text.x = element_text(size=12, face="bold"),
+        strip.text.y = element_text(size=12, face="bold"),
+        strip.background = element_rect(colour="black")) # Black rectangle around facet title
+```
+
+```{r}
+cna<-subset_samples(moth_good,Fraction=="CNA")
+cna.scale<-scale_reads(cna,min(sample_sums(cna)))
+microcystis.scale<-subset_taxa(cna.scale,Species=="Otu00003")
+p<-psmelt(microcystis.scale)
+p$ParMC <- as.numeric(as.matrix(p$ParMC))
+ggplot(p,aes(x=Abundance,y=ParMC))+geom_point()
+fit<-lm(ParMC~Abundance,data=p)
+summary(fit)
+
+ggplot(p,aes(x=Phycocyanin,y=ParMC))+geom_point()
+fit.2<-lm(ParMC~Phycocyanin,data=p)
+summary(fit.2)
+
+
+microcystis.scale<-subset_taxa(cna.scale,Species=="Otu00003")
+ggplot(p,aes(x=Abundance,y=Phycocyanin))+geom_point()
+
+cna<-subset_samples(moth_good,Fraction=="CNA")
+cna.scale<-scale_reads(m.cna,min(sample_sums(m.cna)))
+bdist<-phyloseq::distance(cna.scale,"bray")
+hierfit<-hclust(bdist,method="complete")
+dates<-as.character(data.frame(sample_data(cna))$Date)
+station<-data.frame(sample_data(cna))$Station
+bloom<-data.frame(sample_data(cna))$Bloom
+hierfit$labels<-dates
+plot(hierfit)
+
+
+plot(as.phylo(hierfit),tip.color=d,col="red",cex=.7)
+
+phyco.pool<-data.frame(sample_data(cna))$Phycocyanin
+date<-data.frame(sample_data(cna))$Date
+phyco.date<-data.frame(phyco.pool,date)
+phyco.mean<-aggregate(x = phyco.date,by=list(date),FUN=mean,na.rm=TRUE)
+names(phyco.mean)[1]<-"Date"
+ord<-c("5/27/14","6/10/14","6/16/14","6/30/14","7/8/14","7/14/14","7/21/14","7/29/14","8/4/14","8/11/14","8/18/14","8/25/14","9/2/14","9/8/14","9/15/14","9/23/14","9/29/14","10/6/14","10/15/14","10/20/14","10/27/14","11/3/14")
+phyco.mean<-order_dates(phyco.mean)
+phyco.mean1<-arrange(df = phyco.mean,Date)
+
+
+phyco<-data.frame(sample_data(cna))$Phyco
+phyco.pooled<-phyco.mean1$phyco.pool
+d<-vector(mode="character",length=length(phyco.mean))
+w<-which(phyco.mean$phyco.pool>5)
+d[w]<-"red"
+d[-w]<-"blue"
+
+m.cna<-merge_samples(cna.scale,group = "Date")
+
+```
+# mantel tests
+```{r}
+
+
+bdist<-phyloseq::distance(cna.scale,"bray")
+timedist<-dist(data.frame(sample_data(cna.scale))$DateContinuous)
+phycodist<-dist(data.frame(sample_data(cna.scale))$Phycocyanin)
+chladist<-dist(data.frame(sample_data(cna.scale))$Chla)
+logphycodist<-dist(data.frame(sample_data(cna.scale))$LogPhyco)
+logchladist<-dist(data.frame(sample_data(cna.scale))$LogChla)
+logparmcdist<-dist(data.frame(sample_data(cna.scale))$LogParMC)
+
+# Simple mantel
+mantel(bdist,timedist,method = "pearson")
+mantel(bdist,timedist,method = "spearman")
+
+# Partial mantel
+library(ecodist)
+
+# Phycocyanin
+phyco.na<-which(is.na(phycodist))
+phycodist.na<-phycodist[-phyco.na]
+timedist.na<-timedist[-phyco.na]
+bdist.na<-bdist[-phyco.na]
+# Effect of time, removing effect of phycocyanin
+mantel(formula = bdist.na~timedist.na+phycodist.na)
+# Effect of phycocyanin, removing effect of time
+mantel(formula = bdist.na~phycodist.na+timedist.na)
+
+# Chla
+chla.na<-which(is.na(chladist))
+chladist.na<-phycodist[-chla.na]
+timedist.na<-timedist[-chla.na]
+bdist.na<-bdist[-chla.na]
+# Effect of time, removing effect of phycocyanin
+mantel(formula = bdist.na~timedist.na+chladist.na)
+# Effect of chla, removing effect of time
+mantel(formula = bdist.na~chladist.na+timedist.na)
+
+
+# log phyco
+logphyco.na<-which(is.na(logphycodist))
+logphycodist.na<-logphycodist[-logphyco.na]
+timedist.na<-timedist[-logphyco.na]
+bdist.na<-bdist[-logphyco.na]
+mantel(formula = bdist.na~timedist.na+logphycodist.na)
+mantel(formula = bdist.na~logphycodist.na+timedist.na)
+
+
+# log chla
+logchla.na<-which(is.na(logchladist))
+logchladist.na<-logchladist[-logchla.na]
+timedist.na<-timedist[-logchla.na]
+bdist.na<-bdist[-logchla.na]
+mantel(formula = bdist.na~timedist.na+logchladist.na)
+mantel(formula = bdist.na~logchladist.na+timedist.na)
+
+# log parmc 
+logparmc.na<-which(is.na(logparmcdist))
+logparmcdist.na<-logparmcdist[-logparmc.na]
+timedist.na<-timedist[-logparmc.na]
+bdist.na<-bdist[-logparmc.na]
+mantel(formula = bdist.na~timedist.na+logparmcdist.na)
+mantel(formula = bdist.na~logparmcdist.na+timedist.na)
+
+# Correlogram
+mgram.1<-mgram(bdist,timedist,breaks=seq(0,170,by=7))
+plot(mgram.1,axes=FALSE,xlab="Time (days)")
+axis(side=1, at=seq(0,170,by=14))
+axis(side=2, at=seq(-.25, .6, by=.05))
+abline(h=0,col="blue")
+```

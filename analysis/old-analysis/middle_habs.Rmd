@@ -1,0 +1,596 @@
+---
+title: "Lake Erie HABs 16 data"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r,warning=FALSE,message=FALSE}
+#Load libraries
+library(phyloseq)
+packageVersion("phyloseq")
+library(ggplot2)
+library(vegan)
+library(plyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(gridExtra)
+
+
+# Set working directory
+setwd("~/habs/genomics/data/")
+
+```
+
+## Data import and clean
+```{r data import}
+### Data import
+
+# mothur import
+sharedfile = "mothur/allhabs.shared"
+taxfile = "mothur/allhabs.taxonomy"
+mapfile = "other/metadata_bloom.txt"
+ 
+mothurdata = import_mothur(mothur_shared_file = sharedfile,
+                             mothur_constaxonomy_file = taxfile )
+  
+# We need to change the taxonomy names
+  tax_table(mothurdata) <- cbind(tax_table(mothurdata),row.names(tax_table(mothurdata)))
+  colnames(tax_table(mothurdata)) <- c("Kingdom","Phylum","Class","Order","Family","Genus","Species")
+  
+  #import sample metadata
+  map = import_qiime_sample_data(mapfile)
+  map1 <-map[-1,]
+  colnames(otu_table(mothurdata))<-map1$SampleID
+  moth_merge = merge_phyloseq(mothurdata,map)
+
+  #Filter out shit 
+  moth_good <- subset_samples(moth_merge,Type=="sample")
+  moth_good <- subset_samples(moth_good,Intensive=="n")
+  moth_good <- subset_taxa(moth_good, Kingdom == "Bacteria")
+  moth_good <- subset_taxa(moth_good, Class != "Chloroplast")
+  moth_good <- subset_taxa(moth_good, Family!="mitochondria")
+  moth_good <- prune_taxa(taxa_sums(moth_good)>0,moth_good)
+
+
+```
+
+```{r functions,echo=FALSE}
+### all the functions####
+
+##### FUNCTIONS ########
+
+scale_reads <- function(physeq,n){
+  physeq.scale <- transform_sample_counts(physeq, function(x) {(n*x/sum(x))})
+  otu_table(physeq.scale) = floor(otu_table(physeq.scale))
+  physeq.scale = prune_taxa(taxa_sums(physeq.scale)>0,physeq.scale)
+  return(physeq.scale)
+}
+
+order_dates <- function(df){
+  df$Date <- factor(df$Date, levels = c("5/27","6/10","6/16","6/30","7/8","7/14","7/21","7/29","8/4","8/11","8/18","8/25","9/2","9/8","9/15","9/23","9/29","10/6","10/15","10/20","10/27","11/3"))
+  return(df)
+}
+
+# Function to run adonis test on a distance object and a categorical variable from a metadata data frame
+doadonis <- function(physeq, category) {
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  bdist<-phyloseq::distance(physeq.scale,"bray")
+  col = as(sample_data(physeq),"data.frame")[,category]
+  adonis.bdist=adonis(bdist~col)
+  print(adonis.bdist) 
+  paste("The Homogeneity of dispersion \n")
+ 
+
+ # Homogeneity of dispersion test
+  betatax=betadisper(bdist,col)
+  p=permutest(betatax)
+  print("The homogeneity of dispersion:") 
+  print(p$tab)
+}  
+
+# Function to make an nmds plot with bray-curtis distance including the scaling step
+make_nmds_continuous <- function(physeq,variable,clow,chigh){
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
+  physeq.bray.nmds = ordinate(physeq.scale,method="PCoA","bray")
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = variable) + 
+       geom_point(size=2) + theme(legend.key.size= unit(.25,"cm")) + scale_color_continuous(low = clow,high=chigh)
+  p
+}
+
+# This function takes a phyloseq object, agglomerates OTU's to the desired taxonomic rank, prunes out OTUs below a certain relative proportion in a sample (ie 1% ) and melts the phyloseq object into long format.
+transform_and_melt<-function(physeq,taxrank,prune){
+  
+  # Agglomerate all otu's by phylum level
+  physeq_taxrank<-tax_glom(physeq,taxrank = taxrank)
+
+  # Create a new phyloseq object which removes taxa from each sample below the prune parameter 
+  physeq_taxrank.prune = transform_sample_counts(physeq_taxrank, 
+                                              function(x){x/sum(x)})
+  otu_table(physeq_taxrank.prune)[otu_table(physeq_taxrank.prune)<prune] <- 0 
+  physeq_taxrank.prune  = prune_taxa(taxa_sums(physeq_taxrank.prune)>0,
+                                 physeq_taxrank.prune)
+
+  # Melt into long format and sort by samplenum and phylum
+  physeq_taxrank.long<-psmelt(physeq_taxrank.prune)
+  physeq_taxrank.long<-arrange(physeq_taxrank.long,Samplenum,Phylum)
+
+
+  # Reorder factor levels for dates 
+  physeq_taxrank.long<-order_dates(physeq_taxrank.long)
+  
+  # Reorder factor levers for stations
+  physeq_taxrank.long$Station <-factor(physeq_taxrank.long$Station,
+                                      levels=c("WE2","WE12","WE4"))
+  
+  # Reorder factor levels for Fraction. Change Fraction factor names
+  physeq_taxrank.long$Fraction <- factor(physeq_taxrank.long$Fraction,
+                                        levels=c("CNA","100L","22NA"))
+  levels(physeq_taxrank.long$Fraction) <- c("Full Community", "Particle/Algal", "Free Living")
+  
+  # Return long data frame
+  return(physeq_taxrank.long)
+}
+
+
+# This function takes  a data frame in long format (such as the output from transform_and_melt) and produces a stacked barplot of community composition.   
+
+make_tax_barplot<-function(df,x,y,tax,facet,title,colors,xlab,ylab,relative){
+  ggplot(df,aes_string(x=x,y=y,fill=tax)) +
+        facet_grid(reformulate(facet),scales="free")+
+        geom_bar(stat="identity")+
+    scale_fill_manual(values = colors) + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=50, colour = "black", vjust=1, hjust = 1, size=12),
+          axis.text.y = element_text(colour = "black", size=9),
+          axis.title.y = element_text(face="bold", size=16),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=14),
+          legend.text = element_text(size = 13),
+          legend.position="right",
+          strip.text.x = element_text(size=12, face="bold"),
+          strip.text.y = element_text(size=12, face="bold"),
+          strip.background = element_rect(colour="black"))+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=1,keyheight=1))+
+    xlab(xlab)+
+    ylab(ylab)+
+    ggtitle(title)+
+    if (relative){
+          geom_bar(stat="identity",position="fill",colour="black",show_guide=FALSE) 
+        } else {
+          geom_bar(stat="identity",colour="black",show_guide=FALSE) 
+    }  
+        
+}
+
+# Credit to Hadley Wickham for this function which multiplots with one legend
+grid_arrange_shared_legend <- function(...) {
+    plots <- list(...)
+    g <- ggplotGrob(plots[[1]] + theme(legend.position="bottom"))$grobs
+    legend <- g[[which(sapply(g, function(x) x$name) == "guide-box")]]
+    lheight <- sum(legend$height)
+    grid.arrange(
+        do.call(arrangeGrob, lapply(plots, function(x)
+            x + theme(legend.position="none"))),
+        legend,
+        ncol = 1,
+        heights = unit.c(unit(1, "npc") - lheight, lheight))
+}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+    library(plyr)
+
+    # New version of length which can handle NA's: if na.rm==T, don't count them
+    length2 <- function (x, na.rm=FALSE) {
+        if (na.rm) sum(!is.na(x))
+        else       length(x)
+    }
+
+    # This does the summary. For each group's data frame, return a vector with
+    # N, mean, and sd
+    datac <- ddply(data, groupvars, .drop=.drop,
+      .fun = function(xx, col) {
+        c(N    = length2(xx[[col]], na.rm=na.rm),
+          mean = mean   (xx[[col]], na.rm=na.rm),
+          sd   = sd     (xx[[col]], na.rm=na.rm)
+        )
+      },
+      measurevar
+    )
+
+    # Rename the "mean" column    
+    datac <- rename(datac, c("mean" = measurevar))
+
+    datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+
+    # Confidence interval multiplier for standard error
+    # Calculate t-statistic for confidence interval: 
+    # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+    ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+    datac$ci <- datac$se * ciMult
+
+    return(datac)
+}
+
+
+```
+
+# Sample pooling by station
+```{r}
+
+
+
+```
+
+# Sample read counts
+A lot of the 100um samples have very low read counts because a majority of the reads were chloroplasts. Before removing non-bacteria, all samples had at least 10,000 reads, afterwards many of the 100L samples had as few as 500 reads. This is important to keep in mind for beta diversity analyses, because to include all the samples we need to really throw out a lot of data to normalize the sequencing depth.
+
+```{r}
+# Histogram of sample read counts
+ggplot(data.frame(sum=sample_sums(moth_good)),aes(sum)) + 
+  geom_histogram(colour="white",fill="indianred")+
+  ggtitle("Sample read counts")+xlab("total sequences")
+
+# mean, max and min of sample read counts
+mins<-min(sample_sums(moth_good))
+paste(c("The minimum sample read count is",mins))
+means<-mean(sample_sums(moth_good))
+paste(c("The mean sample read count is",means))
+maxs<-max(sample_sums(moth_good))
+paste(c("The max sample read count is",maxs))
+
+
+```
+
+# Stacked barplots
+
+## Phylum composition across stations and filters
+```{r composition barplot}
+# Colors from ColorBrewer Paired, 12
+phylum.colors <- c(Acidobacteria="#4D4D4D",Actinobacteria="#ff7f00",Armatimonadetes="#ffff99", Bacteroidetes="#6a3d9a",Candidate_division_SR1 ="#b15928" ,Chlorobi="#cab2d6", Chloroflexi="#B2DF8A",Chloroplast="darkgreen",Cyanobacteria="#33A02C",Gemmatimonadetes="#fdbf6f",Planctomycetes="#A6CEE3",Proteobacteria="#1F78B4", unclassified="#fb9a99", Verrucomicrobia ="#e31a1c") 
+
+# Transform to long format and prune out phyla below 2% in each sample
+moth.long<-transform_and_melt(physeq = moth_good,taxrank = "Phylum",prune = .02)
+
+# Plot 
+make_tax_barplot(df = moth.long,x = "Date",y="Abundance",tax = "Phylum",facet = "Fraction~Station",
+                 title = "Phylum composition of particle/algal-associated bacteria
+                          across three Lake Erie stations\n",
+                 colors=phylum.colors,
+                 xlab="",
+                 ylab="Relative Abundance (taxa>2%)",
+                 relative=TRUE)
+
+
+```
+
+
+
+## Cyanobacteria
+
+```{r,echo=FALSE,include=FALSE}
+cyano<-moth_good
+t<-data.frame(tax_table(cyano))
+cyanotax <- paste(t$Genus, t$Species)
+
+cy_taxonomy<-cbind(tax_table(cyano),cyanotax)
+
+
+for  (i in 1:nrow(cy_taxonomy)){ 
+   if (cy_taxonomy[i,2] != "Cyanobacteria") {
+      cy_taxonomy[i,2]<-"Non-Cyano"
+  } else {
+    cy_taxonomy[i,2]<-cy_taxonomy[i,6]
+  }
+}
+
+
+cy_taxonomy_phyloseq <-tax_table(as.matrix(cy_taxonomy))
+
+tax_table(cyano)<-cy_taxonomy_phyloseq
+
+cyano.long <- transform_and_melt(physeq = cyano,taxrank = "Phylum",prune = 0)
+
+cyano.long$Phylum<-factor(cyano.long$Phylum,levels=c("Anabaena","Microcystis","Psuedanabaena","Synechococcus","unclassified","Non-Cyano"))
+cyano.long<-arrange(cyano.long,Phylum)
+
+
+
+make_tax_barplot(df = cyano.long,x = "Date",y="Abundance",tax = "Phylum",facet = "Fraction~Station",
+                 title = "",
+                 colors=c(brewer.pal(4,name="Set3"),"grey"),
+                 xlab="",
+                 ylab="Relative Abundance (taxa>2%)",
+                 relative=TRUE)
+
+```
+
+## Alpha Diversity
+```{r alpha diversity}
+alpha<-read.table("other/alphadiv.txt",header=TRUE)
+
+alpha<-order_dates(alpha)
+
+alpha$Station<-factor(alpha$Station,levels = c("WE2","WE4","WE12"))
+
+richness<-alpha[1:57,]
+evenness<-alpha[58:114,]
+
+p1 <- ggplot(richness,aes(x=Date,y=value,color=Station,group=Station,shape=Station))+
+      geom_point()+geom_line()+
+      ylab("Observed Richness")+xlab("")+
+      ggtitle("Richness")+
+      scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+      theme(axis.text.x = element_text(angle=45, colour = "black", 
+                                   vjust=1, hjust = 1, size=12),
+            strip.text.x = element_text(size=14, face="bold"),
+            strip.text.y = element_text(size=14, face="bold"),
+            strip.background = element_rect(colour="black"))
+
+
+p2 <- ggplot(evenness,aes(x=Date,y=value,color=Station,group=Station,shape=Station))+
+      geom_point()+geom_line()+
+      ylab("Inverse Simpson's Index")+xlab("")+
+      ggtitle("Evenness")+
+      scale_color_manual(values=c("#0c2c84","#1d91c0","#41ae76"))+
+      theme(axis.text.x = element_text(angle=45, colour = "black", 
+                                   vjust=1, hjust = 1, size=12),
+            strip.text.x = element_text(size=14, face="bold"),
+            strip.text.y = element_text(size=14, face="bold"),
+            strip.background = element_rect(colour="black"))
+
+multiplot(p1,p2)
+
+```
+
+
+## Pigment/toxin/nutrient data
+
+### Data import
+
+```{r}
+
+# Import metadata file with nutrients, pigments and toxin
+nutrient <- read.csv("other/habs_nutrients_all.txt",sep="\t")
+
+# Subset to just corestations and reformat
+nutrient<-order_dates(nutrient)
+nutrient$Station <- factor(nutrient$Station,levels=c("WE2","WE4","WE12"))
+
+```
+
+### Plot pooled
+```{r}
+
+nutplot_pooled <- function(df,nutrient,title){
+            nut_sum <- summarySE(df,measurevar = nutrient,groupvars = "Date",na.rm=TRUE)
+            nut_sum$ymax <- nut_sum[,nutrient]+nut_sum[,"se"]
+            nut_sum$ymin <- nut_sum[,nutrient]-nut_sum[,"se"]
+            ggplot(nut_sum,aes_string(x="Date",y=nutrient,group=1))+
+                  geom_line(size=.5)+
+                  geom_errorbar(aes(ymax=ymax,ymin=ymin), width=.3)+
+                  geom_point()+
+                  ggtitle(title)+ scale_shape(solid = FALSE) + xlab("")+
+                  ylab("ug/L")+
+                  theme(axis.text.x = element_text(angle=45,vjust=1, hjust = 1, size=10, face="bold"),     
+                        axis.title.y = element_text(size=14),
+                        plot.title = element_text(size=16,face="bold")
+                  )
+} 
+
+p_NO3 <- nutplot_pooled(df = nutrient,nutrient = "Nitrate",title = "Nitrate")         
+         
+p_NH4 <- nutplot_pooled(df = nutrient,nutrient = "Ammonia",title = "Ammonia") 
+
+p_SRP <- nutplot_pooled(df = nutrient,nutrient = "SRP",title = "Soluble Reactive Phosphorus")
+
+p_parmc <- nutplot_pooled(df = nutrient,nutrient = "ParMC",title = "Particulate Microcystin")
+
+p_phyco <- nutplot_pooled(df = nutrient,nutrient = "Phycocyanin",title = "Phycocyanin")
+
+p_chla <- nutplot_pooled(df = nutrient,nutrient = "Chla",title = "Chlorophyll A")
+
+
+multiplot(p_NO3,p_NH4,p_SRP,p_parmc,p_phyco,p_chla,cols = 2)
+```
+
+### Plot unpooled
+```{r}
+
+nutplot_unpooled <- function(df,nutrient,title){
+        ggplot(df,
+                aes_string(x="Date",y=nutrient,group="Station",shape="Station",color="Station"))+
+         geom_line()+
+         geom_point(size=2)+
+         ggtitle(title)+ 
+         xlab("") + ylab("ug/L")+       
+         scale_color_manual(values=c("#984ea3","#4daf4a","#3288bd"))+
+         theme(axis.text.x = element_text(angle=45,vjust=1, hjust = 1, size=10, face="bold"),     
+               axis.title.y = element_text(size=14),
+               plot.title = element_text(size=16,face="bold"))
+}
+
+
+# Plot phosphorus
+p_SRP <- nutplot_unpooled(nutrient,"SRP","Soluble Reactive Phosphorus")
+                                  
+# Plot nitrate
+p_NO3 <- nutplot_unpooled(nutrient,"Nitrate","Nitrate")
+
+# Plot Ammonia
+p_NH4 <- nutplot_unpooled(nutrient,"Ammonia","Ammonia")
+
+# Plot phycocyanin
+p_phyco <- nutplot_unpooled(nutrient,"Phycocyanin","Phycocyanin")
+  
+# Plot ChlA 
+p_chla <- nutplot_unpooled(nutrient,"Chla","Chlorophyll A")
+
+# Plot Particulate MC
+p_parmc <- nutplot_unpooled(nutrient,"ParMC","Particulate Microcystin")
+
+# multiplot
+grid_arrange_shared_legend(p_NO3,p_NH4,p_SRP,p_parmc,p_phyco,p_chla)
+
+```
+
+### Constrained Ordination
+
+```{r}
+
+cna <- subset_samples(moth_good,Fraction=="CNA")
+cna.scale<-scale_reads(cna,n = 10000)
+
+
+d<-data.frame(sample_data(cna.scale))[,1:18]
+m<-merge(d,nutrient,by.x=c("Date","Station"),by.y=c("Date","Station"))
+m<-arrange(m,Samplenum)
+rownames(m)<-m$SampleID
+sample_data(cna.scale)<-m
+
+
+cna.scale.sub<-subset_samples(cna.scale,!is.na(Phycocyanin) & !is.na(SRP))
+
+bdist<-phyloseq::distance(physeq = cna.scale.sub,method = "bray")
+
+
+cap.ord<-ordinate(physeq = cna.scale.sub,method = "CAP",distance = bdist,formula = ~ParMC+Nitrate+SRP+Phycocyanin+Ammonia+Chla)
+
+
+library(ggvegan)
+theme_set(theme_bw())
+autoplot(cap.ord)+theme(text=element_text(size=20))
+
+```
+
+## NMDS
+```{r}
+
+make_nmds_discrete <- function(physeq,color,shape=NULL,title=NULL,cols){
+  physeq.scale <- scale_reads(physeq,min(sample_sums(physeq)))
+  sample_data(physeq.scale) <- order_dates(sample_data(physeq.scale))
+  set.seed(1)
+  physeq.bray.nmds = ordinate(physeq.scale,method="PCoA","bray")
+  cols<- cols
+ if(!is.null(shape)) {
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = color,shape=shape) + 
+       geom_point(size=3) + theme(legend.key.size= unit(.5,"cm")) + scale_color_manual(values=cols)
+  } else {
+    p <- plot_ordination(physeq.scale, physeq.bray.nmds,color = color) + 
+       geom_point(size=3) + theme(legend.key.size= unit(.5,"cm"),plot.title=element_text(family="Times", face="bold", size=14))+ scale_color_manual(values=cols)
+  }
+  p
+}
+
+CNA<-subset_samples(moth_good,Fraction=="CNA")
+
+p1<-make_nmds_discrete(CNA,color ="Station",shape="Station",title = "",cols=c("#fc8d62","#a6d854","#8da0cb","#66c2a5","#e78ac3"))
+
+set.seed(1)
+p2<-make_nmds_discrete(CNA,color ="Bloom",shape="Station",title = "",cols=c("#fc8d62","#a6d854","#8da0cb","#66c2a5","#e78ac3"))
+
+p4 <-make_nmds_continuous(CNA,variable="Days",clow = "#ffffcc",chigh = "#800026")
+
+p3<-make_nmds_continuous(CNA,variable ="LogPhyco",clow="blue",chigh="orange")
+
+p5<-make_nmds_continuous(CNA,variable ="Chla",clow="blue",chigh="orange")
+
+p3
+multiplot(p4,p3,p1,p2,cols=2)
+
+
+```
+
+
+
+## Oligotyping
+
+```{r}
+o<-read.csv("other/oligo_formatted.csv")
+
+# Remove free living fraction
+oligo.sub<-subset(o,Fraction!="22NA")
+
+# Melt the oligotypes 
+oligo.melt<-melt(value.name = "count",
+                 variable.name = "Oligotype",
+                 id.vars=c("SampleID","Station","Date","Fraction"),
+                 oligo.sub)
+
+# Order dates
+oligo.melt<-order_dates(oligo.melt)
+
+# Reorder factor levers for stations
+oligo.melt$Station <-factor(oligo.melt$Station,
+                                      levels=c("WE2","WE12","WE4"))
+
+# Reorder factor levels for Fraction. Change Fraction factor names
+oligo.melt$Fraction <- factor(oligo.melt$Fraction,
+                                       levels=c("CNA","100L"))
+  
+levels(oligo.melt$Fraction) <- c("Full Community", "100um")
+
+# Plot
+theme_set(theme_gray())
+
+ggplot(oligo.melt,aes_string(x="Date",y="count",fill="Oligotype")) +
+        facet_grid(Fraction~Station,scales="free")+
+        geom_bar(stat="identity")+
+    scale_fill_manual(values = c("#00A0B0","#CC333F","#6A4A3C","white")) + 
+    theme(axis.title.x = element_text(size=16,face="bold"),
+          axis.text.x = element_text(angle=50, colour = "black", vjust=1, hjust = 1, size=12,face="bold"),
+          axis.text.y = element_text(colour = "black", size=12),
+          axis.title.y = element_text(face="bold", size=16),
+          plot.title = element_text(size = 18),
+          legend.title = element_text(size=14),
+          legend.text = element_text(size = 16),
+          legend.position="right",
+          strip.text.x = element_text(size=18, face="bold"),
+          strip.text.y = element_text(size=18, face="bold"),
+          strip.background = element_rect(colour="black"))+
+    guides(fill = guide_legend(reverse= TRUE,keywidth=1,keyheight=1))+   
+    xlab("")+
+    ylab("")
+
+```
+
