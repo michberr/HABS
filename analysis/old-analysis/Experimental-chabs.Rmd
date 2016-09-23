@@ -1,0 +1,1236 @@
+---
+title: 'Lake Erie HABs Community Ecology Manuscript'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    
+---
+    
+
+```{r global_options, echo = FALSE}
+
+knitr::opts_chunk$set(
+  fig.align = 'center', 
+  warning = FALSE, 
+  message = FALSE
+)
+
+```
+
+# Global
+
+```{r load libraries, warning=FALSE}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(grid)
+library(reshape2)
+library(gridExtra)
+library(vegan)
+library(cowplot)
+library(gtable)
+library(pander)
+library(tidyr)
+library(psych)
+
+```
+
+```{r}
+## objects and functions that will be useful throughout this analysis
+
+# Set the ggplot theme
+theme_set(theme_bw())
+
+# Color palette for stations
+station_colors = c("red", "#ffa500", "#0080ff")
+
+# Function to order date levels correctly, including Aug 11
+order_dates_aug11 <- function(df) {
+  df$Date <- factor(df$Date, 
+    levels = c("6/16","6/30","7/8","7/14","7/21",
+      "7/29","8/4","8/11","8/18","8/25","9/2","9/8","9/15",
+      "9/23","9/29","10/6","10/15","10/20","10/27"))
+  return(df)
+}
+
+# Function to order date levels correctly, not including Aug 11
+order_dates <- function(df) {
+ df$Date <- factor(df$Date,
+   levels = c("6/16","6/30","7/8","7/14","7/21",
+     "7/29","8/4", "8/18","8/25","9/2","9/8","9/15",
+     "9/23","9/29","10/6","10/15","10/20","10/27"))
+ return(df)
+}
+
+# Function to create a named list
+# Args: a vector of strings
+#
+# Returns: a list with the names supplied in the vector
+named_list <- function(...){
+    names <- as.list(substitute(list(...)))[-1L]
+    result <- list(...)
+    names(result) <- names
+    result
+}
+
+# Source some useful functions for data normalization
+source("~/git_repos/MicrobeMiseq/R/miseqR.R")
+```
+
+# Load Data
+```{r phyloseq import}
+load("../../Data/formatted-data/erie-data.RData")
+
+# Inspect erie phyloseq object
+erie
+```
+
+
+Scale counts to an even depth by dividing by total reads and multiplying by 
+the minimum library size.
+
+```{r normalization}
+## Scale reads in OTU table to even depth 
+depth = 15000
+
+erie_scale <- 
+  erie %>%
+    scale_reads(n = depth, round = "round") 
+
+
+```
+
+# Figure 1: Bloom temporal dynamics
+Create figure 1, showing pigment concentrations, toxin concentration, and 
+proportion of cyanobacterial reads over time and stations. 
+
+```{r }
+
+# Import metadata file with nutrients, pigments and toxin
+nutrient <- read.csv("../../Data/formatted-data/nutrient_cleaned.csv")
+
+# Format nutrient data
+nutrient_sub <- 
+  nutrient %>%
+    filter(!(Date %in% c("5/27", "6/10", "11/3"))) %>%
+    order_dates_aug11() 
+
+# Calculate relative abundance of Cyanobacteria at each date
+cyano_abundance <- 
+  erie_scale %>%
+    tax_glom(taxrank = "Phylum") %>%                        # conglomerate OTUs to phylum level
+    transform_sample_counts(function(x) {x/sum(x)} ) %>%    # transform to relative abundance
+    subset_taxa(Phylum == "Cyanobacteria") %>%              # Subset to just Cyanobacteria
+    psmelt() %>%                                            # melt phyloseq object
+    rename(Cyanobacteria = Abundance) %>%
+    select(Cyanobacteria, Date, Station)
+
+# Merge cyanobacteria data with nutrient df
+bloom_df <- 
+  nutrient_sub %>%
+    left_join(cyano_abundance, by = c("Station", "Date")) %>%
+    mutate(Phycocyanin = ifelse(Phycocyanin > 80, 80, Phycocyanin)) %>%   # lower extreme values to plot better
+    select(Station, Date, Phycocyanin, Chla, ParMC, Cyanobacteria) %>%
+    melt(id.vars = c("Station", "Date")) %>%
+    order_dates_aug11()
+
+```
+
+```{r figure1, fig.height=6, fig.width=6}
+# Make a faceted ggplot of the four bloom variables over time and grouped by station
+bloom_plots <- ggplot(bloom_df, 
+  aes(x = Date, y = value, group = Station, color = Station, shape = Station)
+) +
+  facet_grid(variable~., scales = "free_y") +
+  geom_point(size = 1.3) +
+  geom_line(size = 1) + 
+  ylab("") +
+  scale_x_discrete(
+    breaks = c("7/8", "8/4", "9/2", "10/6"),
+    labels = c("Jul", "Aug", "Sep", "Oct"),
+    drop = FALSE
+  ) +
+  scale_color_manual(values = station_colors) + 
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(size = 11),
+    axis.title.x = element_blank()
+  )
+
+# function to extract a legend from a ggplot object
+grab_legend <- function(a_ggplot) {
+    tmp <- ggplot_gtable(ggplot_build(a_ggplot))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+    legend <- tmp$grobs[[leg]]
+    legend
+}
+
+station_legend <- grab_legend(bloom_plots) 
+
+bloom_plots
+
+
+ggsave("../../Plots/Figure1.pdf", plot = bloom_plots, width = 6, height = 5) 
+```
+
+## Figure 1 Statistics
+```{r fig.height=3.5, fig.width=10}
+par(mfrow = c(1,3))
+hist(nutrient$Chla)
+hist(nutrient$Phycocyanin)
+hist(nutrient$ParMC)
+```
+
+These distributions are very non-normal. Let's try log-scaling
+
+```{r, fig.height=3.5, fig.width=10}
+par(mfrow = c(1,3))
+hist(log(nutrient$Chla), xlab = "log Chla", main = "")
+hist(log(nutrient$Phycocyanin), xlab = "log Phycocyanin", main = "")
+hist(log(nutrient$ParMC), xlab = "log ParMC", main = "")
+
+```
+
+These look better, so we will use these transformed variables for our correlation tests.
+Since phycocyanin and parmc both have zeroes, we will add a constant to all values.
+We selected this constant to be small and to minimally impact the distribution shape
+```{r fig.height=3.5, fig.width=10}
+par(mfrow = c(1,2))
+
+logChla <- log(nutrient$Chla)
+logPhyco <- log(nutrient$Phycocyanin + 0.1) 
+logParMC <- log(nutrient$ParMC + 0.1) 
+
+hist(logPhyco, main = "", xlab = "log Phyco + 0.1")
+hist(logParMC, main = "", xlab = "log ParMC + 0.1")
+
+```
+
+```{r}
+# lets add log-scaled versions of variables to phyloseq object
+
+nutrient$logChla <- logChla
+nutrient$logPhyco <- logPhyco
+nutrient$logParMC <- logParMC
+
+molec_samples <- as.vector(sample_data(erie)$SampleID)
+
+nutrient_sub <- nutrient %>%
+  select(logChla, logPhyco, logParMC, SampleID) %>%
+  filter(SampleID %in% molec_samples)
+
+sample_data(erie)$logChla <- nutrient_sub$logChla
+sample_data(erie)$logPhyco <- nutrient_sub$logPhyco
+sample_data(erie)$logParMC <- nutrient_sub$logParMC
+```
+
+```{r fig.height=3.5, fig.width=10}
+par(mfrow = c(1,2))
+
+plot(logChla, logPhyco, xlab = "log Chla", ylab = "log Phycocyanin") 
+
+# Examine residuals from linear regrerssion
+hist(lm(logChla~logPhyco)$residuals, xlab = "residuals", main = "")
+
+
+# Calculate linear correlation between Chla and phycocyanin for all sites
+cor.test(
+  x = logChla, 
+  y = logPhyco, 
+  alternative = "two.sided", 
+  method = "pearson"
+)
+
+```
+It looks like there is a pretty close correlation between chl a and phycocyanin
+measurements. Assumptions about normality of model residuals are met when log-scaling
+both variables. 
+    
+
+
+```{r fig.height=3.5, fig.width=10}
+par(mfrow = c(1,2))
+plot(logChla, logParMC)
+plot(logPhyco, logParMC)
+
+cor.test(
+  x = logChla, 
+  y = logParMC, 
+  alternative = "two.sided", 
+  method = "pearson"
+)
+
+cor.test(
+  x = logPhyco, 
+  y = logParMC, 
+  alternative = "two.sided", 
+  method = "pearson"
+)
+
+```
+The statistical tests show that there are significant correlations between
+pigments and toxin, but the plots show that there are several dates in which 
+the toxin levels are 0 but pigments are high, indicating that pigments are not
+always predictive of toxicity. 
+
+
+Do the nearshore and offshore sites have different bloom pigment concentrations?
+```{r}
+nutrient %>%
+  group_by(Shore) %>%
+  summarise(median(Chla))
+
+wilcox.test(Chla ~ Shore, data = nutrient, alternative = "greater")
+
+```
+
+
+How is phycocyanin related to particulate microcystin levels in the early bloom
+versus the late bloom? 
+```{r fig.height=3.5, fig.width=10}
+par(mfrow = c(1,2))
+################ early bloom #############################
+
+early <- nutrient %>%
+  filter(Month %in% c("June", "July", "August")) 
+
+# Fit model
+fit_early <- lm(log(ParMC + 0.1) ~ log(Phycocyanin + 0.1), data = early)
+
+# Plot model
+plot(x = log(early$ParMC + 0.1), y = log(early$Phycocyanin + 0.1))
+
+# Check residuals to make sure they are normal
+hist(fit_early$residuals, xlab = "residuals", main = "")
+
+
+# summary of model
+summary(fit_early)
+
+```
+
+```{r fig.height=3.5, fig.width=10}
+par(mfrow = c(1,2))
+################ late bloom #############################
+
+late <- nutrient %>%
+  filter(Month %in% c("September", "October")) 
+
+# Plot model
+plot(x = log(late$ParMC + 0.1), y = log(late$Phycocyanin + 0.1))
+
+# Fit model
+fit_late <- lm(log(ParMC + 0.1) ~ log(Phycocyanin + 0.1), data = late)
+
+# Check residuals to make sure they are normal
+hist(fit_late$residuals, xlab = "residuals", main = "")
+
+# summary of model
+summary(fit_late)
+
+```
+
+Based on these two linear models, we see that the slope estimate for phycocyanin
+is much lower in the late part of the bloom than the early part of the bloom. 
+
+
+
+
+# Figure 2: Cyano OTUs
+In this figure we will display in part A a barplot with the relative abundance of
+cyanobacteria genera over time and site. In part B we will break up these groups
+into OTUs and show lineplots for each non-rare OTU over time (mean rel abundance > 0.0001) and site. 
+
+
+```{r}
+## Select only cyano OTUs that have mean relative abundace > 0.0005
+n = 15000
+thresh = 0.0005
+
+# Calculate mean relative abundance for each OTU
+tax_mean <- taxa_sums(erie_scale)/nsamples(erie_scale)
+
+# Prune low abundance taxa using thresh as mean relative abundance
+erie_prune_0001 <- 
+  erie_scale %>%
+    prune_taxa(tax_mean > thresh*n, .)
+
+
+# Create a melted data frame of selected cyanobacteria OTUs
+cyano_otus <- 
+  erie_prune_0001 %>%
+    transform_sample_counts(function(x) {x/sum(x)}) %>%
+    subset_taxa(Class == "Cyanobacteria") %>%
+    psmelt() %>%
+    order_dates()
+```
+
+
+```{r}
+################# Plot A #######################
+
+cyano_genus <-
+  cyano_otus %>%
+    group_by(Genus, Date, Station) %>%
+    summarize(Abundance = sum(Abundance)) %>%
+    arrange(Genus) %>%
+    order_dates()
+
+
+plot2a <- ggplot(cyano_genus, aes(x = Date, y = Abundance, fill = Genus)) +
+  facet_grid(~Station) +
+  geom_bar(stat = "identity") +
+  ylab("rel. abundance") + 
+  scale_x_discrete(
+      breaks = c("7/8", "8/4", "9/2", "10/6"),
+      labels = c("Jul", "Aug", "Sep", "Oct"),
+      drop = FALSE
+    ) +
+  scale_fill_manual(values = c("#755147", "#74b67f", "#3f7a9f" , "#753376", "#ff9a00")) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 9),
+    plot.title = element_text(size = 10, face = "bold"),
+    strip.background = element_blank()
+  ) 
+
+genus_legend <- grab_legend(plot2a)
+
+plot2a <- plot2a + theme(legend.position = "none")
+```
+
+
+
+```{r}
+
+# Function to make a ggplot lineplot of an OTU's relative abundance over time
+#
+# Args:
+#   df: a melted data frame generated by calling psmelt() on a phyloseq object. 
+#       Contains an "Abundance" column for the OTU's abundance 
+#   otu: the OTU to generate a lineplot for
+#   taxrank: the taxonomic rank to appear in the plot title (e.g. "Genus")
+# Returns:
+#   a ggplot lineplot
+plot_otus <- function(df, otu, taxrank) {
+  ggplot(df, 
+    aes(x = Date, y = Abundance, group = Station, color = Station, shape = Station)) +
+    geom_point(size = 2) +
+    geom_line(size = 0.7) +
+    ggtitle(paste(df[1, taxrank], otu)) +
+    ylab("rel. abund") + 
+    scale_color_manual(values = station_colors) +
+    scale_x_discrete(
+      breaks = c("7/8", "8/4", "9/2", "10/6"),
+      labels = c("Jul", "Aug", "Sep", "Oct"),
+      drop = FALSE
+    ) +
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_text(size = 9),
+      legend.position = "none",
+      plot.title = element_text(size = 10, face = "bold")
+    ) 
+}
+
+
+
+##################### Plot B #############################
+
+cyano_otu_names <- as.list(levels(cyano_otus$Species))
+names(cyano_otu_names) <- levels(cyano_otus$Species)
+
+
+# Generate a lineplot for each cyanobacteria with mean relative abundance > 0.0001
+cyano_otu_plots <- lapply(cyano_otu_names, 
+  function(otu) {
+    df_otu <- filter(cyano_otus, OTU == otu)
+    plot <- plot_otus(df = df_otu, otu = otu, taxrank = "Genus") 
+    return(plot)
+  }
+)
+
+plot2b <- arrangeGrob(
+  cyano_otu_plots$Otu00007, cyano_otu_plots$Otu00177, cyano_otu_plots$Otu00005,
+  cyano_otu_plots$Otu00044, cyano_otu_plots$Otu00304, cyano_otu_plots$Otu00037, 
+  cyano_otu_plots$Otu00147, cyano_otu_plots$Otu00193, cyano_otu_plots$Otu00049,
+  ncol = 3, nrow = 3
+)
+```
+
+
+```{r fig.width=10, fig.height=8}
+##################### Compile plots #####################################
+
+ggdraw() +
+  draw_plot(plot2a, x = 0.03, y = 0.7, width = .8, height = 0.28) +
+  draw_plot(genus_legend, x = 0.83, y = .76, width = .16, height = .18) + 
+  draw_plot(plot2b, x = 0.03, y = 0.02, width = .8, height = 0.64) +
+  draw_plot(station_legend, x = 0.80, y = .5, width = .18, height = .18) + 
+  draw_plot_label(c("A", "B"), c(0.02, 0.02), c(0.97, 0.68), size = 14) 
+
+ggsave("../../Plots/Figure2.pdf", plot = bloom_plots, width = 10, height = 8) 
+
+```
+
+## Figure 2 statistics
+
+What is the most abundant genus?
+```{r}
+cyano_genus %>%
+  group_by(Genus) %>%
+  summarise(median(Abundance))
+
+```
+
+What if we look at each site separately?
+```{r}
+cyano_genus %>%
+  group_by(Genus, Station) %>%
+  summarise(median(Abundance))
+```
+
+Which Cyanobacteria are associated with each other? Spearman's rho
+correlations are shown and significant
+correlations are bolded. 
+```{r}
+
+# Create a phyloseq object of only cyanobacteria OTUs
+cyano_physeq <- 
+  erie_prune_0001 %>%
+    transform_sample_counts(function(x) {x/sum(x)}) %>%
+    subset_taxa(Class == "Cyanobacteria")
+
+taxa_names(cyano_physeq) <- paste(
+  tax_table(cyano_physeq)[ , "Genus"], 
+  taxa_names(cyano_physeq)
+)
+
+# Run pairwise spearman correlation tests between all cyanobacteria genera.
+cyano_corrs_spearman <- corr.test(
+  t(otu_table(cyano_physeq)), 
+  use = "complete", 
+  method = "spearman", 
+  adjust = "fdr"
+)
+
+emphasize.strong.cells(which(cyano_corrs_spearman$p < 0.05, arr.ind = TRUE))
+pander(signif(cyano_corrs_spearman$r, digits = 2))
+
+```
+
+
+
+# Figure 3: Alpha diversity
+
+```{r}
+
+# My own subsetting function, similar to phyloseq::subset_taxa, except taxa can 
+# be passed as arguments within functions without weird environment errors
+#
+# Args:
+#   physeq: a phyloseq object
+#   taxrank: taxonomic rank to filter on
+#   taxa: a vector of taxa groups to filter on
+#
+# Returns: 
+#   a phyloseq object subsetted to the x taxa in taxrank
+my_subset_taxa <- function(physeq, taxrank, taxa) {
+  physeq_tax_sub <- tax_table(physeq)[tax_table(physeq)[ , taxrank] %in% taxa, ]
+  tax_table(physeq) <- physeq_tax_sub
+  return(physeq)
+}
+
+```
+
+Here we estimate alpha diversity  by sampling with replacement 100x
+and averaging OTU richness and Simpson's E over each of the trials
+
+```{r, cache = TRUE}
+# Initialize parameters
+trials = 100
+min_lib = min(sample_sums(erie)) # Depth we are rarefying to
+
+# Groups to estimate alpha diversity for 
+mytaxa <- c(
+  "Bacteria", "NcBacteria", "Actinobacteria", "Alphaproteobacteria",
+  "Betaproteobacteria", "Bacteroidetes", "Gammaproteobacteria", 
+  "Deltaproteobacteria", "Verrucomicrobia"
+)
+names(mytaxa) <- mytaxa
+
+# Taxonomic ranks of mytaxa
+mytaxa_taxrank <- c(
+  "Kingdom", "Class", "Phylum", "Class", "Class", 
+  "Phylum", "Class", "Class", "Phylum"
+)
+names(mytaxa_taxrank) <- mytaxa
+
+# Data frame to hold alpha diversity estimates over trials
+alphadiv_df <- data.frame(matrix(nrow = nsamples(erie), ncol = trials))
+
+# Initialize empty df's for richness and evenness of all taxa in mytaxa
+richness <- lapply(mytaxa, function(x) {return(alphadiv_df)} )
+simpson <- lapply(mytaxa, function(x) {return(alphadiv_df)} )
+
+alphadiv_list <- list(richness = richness, simpson = simpson)
+
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(3)
+
+# Run trials to subsample and estimate diversity
+for (i in 1:trials) {
+  # Subsample
+  rarefied_physeq <- rarefy_even_depth(erie, sample.size = min_lib, verbose = FALSE, replace = TRUE)
+  
+  # Generate alpha-diversity estimates for each taxonomic group
+  for (t in mytaxa) {
+    # Subset physeq object to taxa in mytaxa
+    if (t != "NcBacteria") {
+      physeq_sub <- my_subset_taxa(
+        physeq = rarefied_physeq, 
+        taxrank = mytaxa_taxrank[t], 
+        taxa = t
+      )
+    } else {
+      physeq_sub <- subset_taxa(physeq = rarefied_physeq, Class != "Cyanobacteria")
+    }
+    
+    # Calculate observed richness for that group and store value in a df column
+    richness <- estimate_richness(physeq_sub, measures = "Observed")[ ,1]
+    alphadiv_list$richness[[t]][ ,i] <- richness
+     
+    # Calculate Simpson's E for that group and store value in a df column
+    alphadiv_list$simpson[[t]][ ,i] <- (estimate_richness(physeq_sub, measures = "InvSimpson")[ ,1]/richness)
+
+  }
+}
+  
+```
+
+
+```{r}
+
+# Calculate the means of richness and inverse simpson from the 100 trials
+alphadiv_est <- lapply(alphadiv_list, function(div_measure) {
+    lapply(div_measure, function(taxa_group) {
+        alpha_mean <- rowMeans(taxa_group)
+        return(alpha_mean)
+    })  
+})
+
+# Convert alphadiv_est richness and simpson's E lists into wide data frames
+l <- lapply(alphadiv_est, function(x) {
+  # convert from list to data.frame
+  est_df <- plyr::ldply(.data = x, .fun = data.frame)
+  names(est_df) <- c("Taxa", "Diversity")
+  
+  # Add in SampleID column and spread to wide format
+  r <- est_df %>%
+    mutate(SampleID = rep(sample_names(erie), length(mytaxa)))
+  return(r)
+})
+
+# Merge sample metadata with these estimates
+merge_dat <- data.frame(sample_data(erie)) %>%
+  select(SampleID, logChla, pH, logPhyco, Station, Date, Days)
+
+# Create a df with a "Diversity" column that includes richness and inv. simpson,
+# and log-chl a values from erie sample_data
+alpha_comb <- l$richness %>% 
+  left_join(y = l$simpson, by = c("Taxa", "SampleID")) %>%   # Join the richness and inv_simp df's
+  rename(Richness = Diversity.x, Simpson = Diversity.y) %>%  # rename columns to avoid confusion
+  left_join(merge_dat, by = "SampleID") %>%                  # Join with merged nutrient data
+  gather(key = "Alphadiv", value = "Estimate", Richness, Simpson) %>%
+  order_dates()
+
+
+```
+
+```{r}
+
+# Function to test whether there is a linear relationship 
+# between log chla and alpha diversity of a group
+#
+# Args:
+#   df: a data frame with columns for diversity estimate and bloom variable (e.g. logChla, logPhyco)
+#
+# Returns:
+#   a vector with the pvalue and R2 of the linear model
+test_alphadiv_pp <- function(df) {
+  
+  df_sub <- 
+    df %>% 
+      select(logChla, Estimate) %>%
+      na.omit()
+  
+  # Fit a linear model 
+  fit <- lm(Estimate ~ logChla, data = df_sub)
+  
+  # Grab model outputs
+  fit_pvalue <- summary(fit)$coef[2,4]
+  fit_r2 <- summary(fit)$r.squared
+  
+  return(c(fit_pvalue, fit_r2))
+}
+
+divs <- named_list("Richness", "Simpson")
+
+# apply alpha div test to each diversity index for each group
+alpha_models <- lapply(divs, function(d) {
+  alpha_sub <- alpha_comb %>% filter(Alphadiv == d)
+  lapply(mytaxa, function(t) {
+    alpha_sub <- alpha_sub %>% filter(Taxa == t)
+    # Fit linear model 
+    fit <- test_alphadiv_pp(alpha_sub)
+    return(fit)
+  })
+})
+
+# Unlist richness
+alpha_results <- lapply(alpha_models, function(x) {
+  f <- x %>% 
+     unlist(use.names = FALSE) %>%
+     matrix(
+        nrow = length(mytaxa), 
+        ncol = 2, 
+        byrow = TRUE, 
+        dimnames = list(mytaxa, c("pvalue","r2"))
+    )
+    
+  # fdr correction on pvalues
+  f[ ,1] <- p.adjust(f[ ,1], method = "fdr") 
+  # Round to three significant digits
+  f <- round(f, digits = 3)
+})
+
+```
+
+```{r fig.height=7, fig.width=13}
+
+# Function to make a ggplot scatterplot of logChla vs an alpha-diversity metric.
+# If the pvalue is below 0.05, it will also plot the fitted line
+#
+# Args:
+#   df: a melted data frame with a column called logChla and value for alpha-diversity
+#   measure: Alpha-diversity measure (e.g. "InvSimpson" or "Observed")
+#   group: Taxonomic group to plot (e.g. "Betaproteobacteria")
+#   pvalue: pvalue from linear model returned by test_alphadiv_pp
+#   r2: r2 from linear model returned by test_alphadiv_pp
+#
+# Returns:
+#   a ggplot
+make_alphadiv_plot <- function(df, measure, group, pvalue, r2) {
+  
+  g <- ggplot(df, aes(x = logChla, y = Estimate)) + 
+    geom_point() +
+    ylab(measure) +
+    ggtitle(group) 
+  
+  # Since we rounded to 3 sigfigs, estimates of 0 need to actually say "p < 0.001"
+  if (pvalue == 0) {
+    g <- g + annotate(
+      "text", 
+      x = 0.9,
+      y = max(df$Estimate) - 0.03*max(df$Estimate), 
+      size = 3, 
+      label = "p < 0.001"
+    )
+  } else if (pvalue < 0.05 & pvalue != 0) {
+    g <- g + annotate(
+        "text", 
+        x = 0.9,
+        y = max(df$Estimate) - 0.03*max(df$Estimate), 
+        size = 3, 
+        label = paste("p =", pvalue)
+      ) 
+  }
+  
+  if (pvalue < 0.05) {
+    g <- g + 
+      annotate(
+        "text",
+        x = 0.9,
+        y = max(df$Estimate) - 0.08*max(df$Estimate),
+        size = 3,
+        label = paste("R2 =", r2)
+      ) +
+      geom_smooth(method = "lm", size = 1)
+  }
+  
+  return(g)
+                     
+}
+```
+
+
+```{r}
+
+## Make plots for Simpson's E vs log chla
+simp_plots <- list()
+
+for (i in 1:length(mytaxa)) {
+  df <- filter(alpha_comb, Taxa == mytaxa[i]) %>%
+    filter(Alphadiv == "Simpson") 
+  simp_plots[[i]] <- make_alphadiv_plot(
+    df = df, 
+    measure = "Simpson's E", 
+    group = mytaxa[i],
+    pvalue = alpha_results$Simpson[i, 1],
+    r2 = alpha_results$Simpson[i, 2]
+  )
+}
+
+# Fit quadratic to alphaproteo evenness
+alphaproteo <- filter(alpha_comb, Taxa == "Alphaproteobacteria") %>%
+  filter(Alphadiv == "Simpson")
+quad_fit <- lm(Estimate ~ logChla + I(logChla^2), data = alphaproteo)
+summary(quad_fit)
+
+simp_plots[[4]] <- simp_plots[[4]] + 
+  stat_smooth(method = "lm", formula = y ~ poly(x, 2)) +
+  annotate(
+    "text",
+    x = 0.9,
+    y = .34,
+    size = 3,
+    label = paste("p < 0.001") 
+  ) + 
+  annotate(
+    "text",
+    x = 0.9,
+    y = .31,
+    size = 3,
+    label = paste("R2 =", round(summary(quad_fit)$adj.r.squared, 3))
+  ) 
+
+
+## Make plots for observed richness vs log chla
+rich_plots <- list()
+
+for (i in 1:length(mytaxa)) {
+  df <- filter(alpha_comb, Taxa == mytaxa[i]) %>%
+    filter(Alphadiv == "Richness")
+  rich_plots[[i]] <- make_alphadiv_plot(
+    df = df, 
+    measure = "Obs. Richness", 
+    group = mytaxa[i],
+    pvalue = alpha_results$Richness[i, 1],
+    r2 = alpha_results$Richness[i, 2]
+  )
+}
+
+
+```
+
+
+
+Seasonal alpha diversity plots
+```{r}
+alphadiv_ncbacteria_simpson <- alpha_comb %>%
+  filter(Taxa == "NcBacteria") %>%
+  filter(Alphadiv == "Simpson") %>%
+  order_dates()
+
+seasonE <- ggplot(alphadiv_ncbacteria_simpson, aes(x = Date, y = Estimate, group = Station, color = Station, shape = Station)) +
+  geom_point() +
+  geom_line() +
+  scale_color_manual(values = station_colors) +
+  ylab("Simpson's E") +
+  xlab("") +
+  scale_x_discrete(
+      breaks = c("7/8", "8/4", "9/2", "10/6"),
+      labels = c("Jul", "Aug", "Sep", "Oct"),
+      drop = FALSE
+  ) + 
+  theme(legend.position = "none") +
+  ggtitle("Nc-Bacteria")
+
+alphadiv_ncbacteria_rich <- alpha_comb %>%
+  filter(Taxa == "NcBacteria") %>%
+  filter(Alphadiv == "Richness") %>%
+  order_dates()
+  
+seasonRich <- ggplot(alphadiv_ncbacteria_rich, aes(x = Date, y = Estimate, group = Station, color = Station, shape = Station)) +
+  geom_point() +
+  geom_line() +
+  scale_color_manual(values = station_colors) +
+  ylab("Obs. Richness") +
+  xlab("") +
+  scale_x_discrete(
+      breaks = c("7/8", "8/4", "9/2", "10/6"),
+      labels = c("Jul", "Aug", "Sep", "Oct"),
+      drop = FALSE
+  ) + 
+  theme(legend.position = "none") +
+  ggtitle("Nc-Bacteria")
+```
+
+```{r fig.width = 7, fig.height=10}
+
+
+## Arrange plots for final figure
+ggdraw() +
+  draw_plot(seasonRich,      x = 0.01,  y = 0.73, width = 0.48, height = 0.24) + 
+  draw_plot(rich_plots[[4]], x = 0.01,  y = 0.49, width = 0.48, height = 0.24) +  
+  draw_plot(rich_plots[[5]], x = 0.01,  y = 0.25, width = 0.48, height = 0.24) +
+  draw_plot(rich_plots[[6]], x = 0.01,  y = 0.01, width = 0.48, height = 0.24) +
+  draw_plot(seasonE,         x = 0.52,  y = 0.73, width = 0.48, height = 0.24) + 
+  draw_plot(simp_plots[[4]], x = 0.52,  y = 0.49, width = 0.48, height = 0.24) +  
+  draw_plot(simp_plots[[5]], x = 0.52,  y = 0.25, width = 0.48, height = 0.24) +
+  draw_plot(simp_plots[[6]], x = 0.52,  y = 0.01, width = 0.48, height = 0.24) +
+  draw_plot_label(c("A", "B", "C", "D", "E", "F", "G", "H"),  c(0, 0, 0, 0, .52, .52, .52, .52), c(0.99, 0.74, 0.5, 0.26), size = 14)
+
+ggsave("../../Plots/Figure3.pdf", height = 10, width = 7)
+
+```
+
+# Figure 4: Composition analyses
+
+
+```{r}
+
+# Subset to non-cyanobacteria and scale internally
+ncbacteria <- 
+  erie %>%
+    subset_taxa(Class != "Cyanobacteria") %>%
+    scale_reads(round = "round")
+
+
+# Generate pcoa scores for each subset
+ncbact_pcoa <- ordinate(
+      physeq = ncbacteria,
+      method = "PCoA",
+      distance = "bray"
+)
+
+# Generate a df to plot pcoa for each subset
+pcoa_df <- plot_ordination(
+  physeq = ncbacteria,
+  axes = 1:3,
+  ordination = ncbact_pcoa,
+  justDF = TRUE
+)
+
+pcoa_df <- pcoa_df %>% 
+  rename(PC1 = Axis.1, PC2 = Axis.2, PC3 = Axis.3) %>%
+  order_dates() %>%
+  # Flip orientation of PC2 for Cyanobacteria (does not affect interpretation)
+  mutate(PC2 = -PC2) 
+
+
+# Generate relative, lingoes-corrected eigenvalues for PC1 and PC2
+pcs <- c(
+  PC1 = signif(ncbact_pcoa$values$Rel_corr_eig[1]*100, 3),
+  PC2 = signif(ncbact_pcoa$values$Rel_corr_eig[2]*100, 3),
+  PC3 = signif(ncbact_pcoa$values$Rel_corr_eig[3]*100, 3)
+)
+
+```
+
+```{r}
+# Function to create a plot of time (x-axis) vs PC scores (y-axis)
+plot_pcts <- function(df, pc, eigs) {
+  ggplot(df, 
+    aes_string(x = "Date", y = pc, group = "Station", color = "Station", shape = "Station")) +
+      geom_point(size = 2.5) +
+      geom_line(size = 1.1) + 
+      scale_color_manual(values = station_colors) +
+      scale_x_discrete(
+        breaks = c("7/8", "8/4", "9/2", "10/6"),
+        labels = c("Jul", "Aug", "Sep", "Oct"),
+        drop = FALSE
+      ) +  
+      ylab(paste(pc, " ", eigs[pc], "%")) +
+      theme(
+        axis.title.x = element_blank(),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.position = "none",
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+      ) 
+}
+
+# Non-cyano PC time series plots
+ncbact_pcs <- named_list("PC1", "PC2", "PC3")
+
+ncbact_pc_plots <- lapply(ncbact_pcs,
+  function(x) {
+    plot_pcts(pcoa_df, x, eigs = pcs)
+  }
+)
+
+```
+
+
+```{r}
+
+# Plot for pH
+ph_plot <- ggplot(pcoa_df, aes(x = PC1, y = pH)) +
+  geom_point(size = 2.5, aes(shape = Station, color = Station)) +
+  scale_color_manual(values = station_colors) +
+  geom_smooth(method = "lm", color = "black") +
+  theme(legend.position = "none")
+
+# Plot for Temperature
+temp_plot <- ggplot(pcoa_df, aes(x = PC2, y = Temp)) +
+  geom_point(size = 2.5, aes(shape = Station, color = Station)) +
+  scale_color_manual(values = station_colors) +
+  geom_smooth(method = "lm", color = "black") +
+  theme(legend.position = "none") +
+  ylab("Temperature")
+
+# Plot for SpCond
+spcond_plot <- ggplot(pcoa_df, aes(x = PC3, y = SpCond)) +
+  geom_point(size = 2.5, aes(shape = Station, color = Station)) +
+  scale_color_manual(values = station_colors) +
+  geom_smooth(method = "lm", color = "black") +
+  theme(legend.position = "none") +
+  ylab("Specific Conductivity")
+
+```
+
+## Compiled plot
+```{r fig.height=7, fig.width=15}
+
+ggdraw() +
+  ## non-cyano
+  draw_plot(ncbact_pc_plots$PC1, x = 0.02, y = 0.5, width = 0.3, height = 0.42) +
+  draw_plot(ncbact_pc_plots$PC2, x = 0.34, y = 0.5, width = 0.3, height = 0.42) +
+  draw_plot(ncbact_pc_plots$PC3, x = 0.66, y = 0.5, width = 0.3, height = 0.42) +
+  draw_plot(ph_plot, x = 0.02, y = 0.0, width = 0.3, height = 0.42) +
+  draw_plot(temp_plot, x = 0.34, y = 0.0, width = 0.3, height = 0.42) +
+  draw_plot(spcond_plot, x = 0.66, y = 0.0, width = 0.3, height = 0.42) 
+  
+
+```
+
+## Figure 4 Statistics
+
+How many PCoA dimensions should we examine? 
+
+```{r}
+plot(1:nrow(ncbact_pcoa$values), ncbact_pcoa$values$Rel_corr_eig, xlab = 
+       "Principal Coordinate", ylab = "Relative eigenvalue")
+
+```
+
+How good is my PCoA in three dimensions?
+```{r}
+pcoa_dist <- as.vector(dist(ncbact_pcoa$vectors[,1:3]))
+bray_dist <- as.vector(phyloseq::distance(ncbacteria, method = "bray"))
+
+plot(bray_dist, pcoa_dist) +
+ abline(lm(pcoa_dist~bray_dist), col = "blue")
+
+summary(lm(pcoa_dist~bray_dist))
+```
+
+
+What is the max bray-curtis between time points for each site? 
+```{r}
+# Histogram of bray-curtis distance
+hist(bray_dist)
+
+# Nearshore 1 
+n1 <- subset_samples(erie_scale, Station == "nearshore1")
+n1_bdist <- phyloseq::distance(n1, method = "bray")
+max(n1_bdist)
+
+# Nearshore 2
+n2 <- subset_samples(erie_scale, Station == "nearshore2")
+n2_bdist <- phyloseq::distance(n2, method = "bray")
+max(n2_bdist)
+
+# Offshore 
+o <- subset_samples(erie_scale, Station == "offshore")
+o_bdist <- phyloseq::distance(o, method = "bray")
+max(o_bdist)
+
+
+```
+
+
+
+## Linear models
+
+
+```{r}
+
+# Variables to include in cyano models
+cyano_vars <- c("Nitrate", "SRP", "Temp", "H2O2", "SpCond", "Ammonia", "Turbidity", "TP", "Days")
+
+
+# Examine distributions of potential env variables to normalize
+par(mfrow = c(3,3))
+for (var in cyano_vars) {
+  hist(nutrient[ ,var], main = "", xlab = var, ylab = "" )
+}
+
+
+# Adjusted variables to include in cyano models
+cyano_vars <- c("sqrt(Nitrate)", "log(SRP)", "Temp", "log(H2O2)", "SpCond", "log(Ammonia)", "log(Turbidity)", "log(TP)", "Days")
+
+
+# Variables to include in nc-bacteria models
+non_cyano_vars <- c(cyano_vars, "pH",  "logParMC", "logChla", "logPhyco")
+
+
+# Impute SpCond values for nearshore 1 on Sep 2 and Sep 8 with value for nearshore 2
+
+# Change 9/2 value
+pcoa_df$SpCond[pcoa_df$Date == "9/2" & pcoa_df$Station == "nearshore1"] <- 
+  pcoa_df$SpCond[pcoa_df$Date == "9/2" & pcoa_df$Station == "nearshore2"]
+# Change 9/8 value
+pcoa_df$SpCond[pcoa_df$Date == "9/8" & pcoa_df$Station == "nearshore1"] <- 
+  pcoa_df$SpCond[pcoa_df$Date == "9/8" & pcoa_df$Station == "nearshore2"]
+  
+```
+
+## Non-cyano models
+
+```{r env variables}
+
+get_models <- function(vars, response, dat) {
+  models <- list()
+  for (var in vars) {
+    models[[var]] <- lm(reformulate(termlabels = var, response = response), data = dat)
+  }
+  return(models)
+}
+```
+
+```{r}
+ncbact_pcs <- named_list("PC1", "PC2", "PC3")
+
+# Get the simple linear models for each variable along each PC
+non_cyano_models <- lapply(ncbact_pcs, function(x) {
+   get_models(non_cyano_vars, x, dat = pcoa_df)
+})
+
+# Get rsquared for each model
+rsquared <- lapply(non_cyano_models, function(x) {
+  lapply(x, function(y) {
+    r2 <- summary(y)$r.squared
+    return(r2)
+  })
+})
+
+rsquared_df <- rbind(data.frame(rsquared$PC1), data.frame(rsquared$PC2), data.frame(rsquared$PC3))
+rsquared_df$PC <- c("PC1", "PC2", "PC3")
+
+rsquared_df
+
+
+# Get rsquared for each model
+pvalue <- lapply(non_cyano_models, function(x) {
+  lapply(x, function(y) {
+    p <- summary(y)$coefficients[2,4]
+    return(p)
+  })
+})
+
+pvalue_df <- rbind(data.frame(pvalue$PC1), data.frame(pvalue$PC2), data.frame(pvalue$PC3))
+pvalue_df$PC <- c("PC1", "PC2", "PC3")
+
+pvalue_df
+```
+
+```{r}
+par(mfrow = c(4, 3))
+# Look at temporal autocorrelation
+n1 <- which(pcoa_df$Station == "nearshore1")
+n2 <- which(pcoa_df$Station == "nearshore2")
+o <- which(pcoa_df$Station == "offshore")
+
+n1_ph <- which(!is.na(pcoa_df$pH) & pcoa_df$Station == "nearshore1")
+n2_ph <- which(!is.na(pcoa_df$pH) & pcoa_df$Station == "nearshore2")
+o_ph <- which(!is.na(pcoa_df$pH) & pcoa_df$Station == "offshore")
+
+pc1_ph <- lm(PC1 ~ pH, data = pcoa_df)
+
+acf(residuals(pc1_ph)[n1_ph], main = "PC1 ~ pH; nearshore 1")
+acf(residuals(pc1_ph)[n2_ph], main = "PC1 ~ pH; nearshore 2")
+acf(residuals(pc1_ph)[o_ph], main = "PC1 ~ pH; offshore")
+
+pc1_turb <- lm(PC1 ~ Turbidity, data = pcoa_df)
+acf(residuals(pc1_turb)[n1], main = "PC1 ~ Turbidity; nearshore 1")
+acf(residuals(pc1_turb)[n2], main = "PC1 ~ Turbidity; nearshore 2")
+acf(residuals(pc1_turb)[o],  main = "PC1 ~ Turbidity; offshore")
+
+pc2 <- lm(PC2 ~ Temp, data = pcoa_df)
+acf(residuals(pc2)[n1], main = "PC2 ~ Temp; nearshore 1")
+acf(residuals(pc2)[n2], main = "PC2 ~ Temp; nearshore 2")
+acf(residuals(pc2)[o], main = "PC2 ~ Temp; offshore")
+
+pc3 <- lm(PC3 ~ SpCond, data = pcoa_df)
+acf(residuals(pc3)[n1], main = "PC3 ~ SpCond; nearshore 1")
+acf(residuals(pc3)[n2], main = "PC3 ~ SpCond; nearshore 2")
+acf(residuals(pc3)[o], main = "PC3 ~ SpCond; offshore")
+
+
+
+```
+
+
+Cross validation error, leaving out one time point at a time
+```{r}
+dates <- levels(pcoa_df$Date)
+loocv <- rep(0, length(dates))
+names(loocv) <- dates
+
+# PC1
+for (date in dates) {
+  train <- filter(pcoa_df, Date != date)
+  test <- filter(pcoa_df, Date == date)
+  fit <- lm(PC1 ~ log(Turbidity), data = train)
+  pred <- predict(fit, test)
+  loocv[date] <- mean((test$PC1 - pred)^2)
+}
+mean(loocv)
+
+for (date in dates) {
+  train <- filter(pcoa_df, Date != date)
+  test <- filter(pcoa_df, Date == date)
+  fit <- lm(PC1 ~ pH, data = train)
+  pred <- predict(fit, test)
+  loocv[date] <- mean((test$PC1 - pred)^2)
+}
+mean(loocv[-18])
+
+# PC2
+for (date in dates) {
+  train <- filter(pcoa_df, Date != date)
+  test <- filter(pcoa_df, Date == date)
+  fit <- lm(PC2 ~  Temp, data = train)
+  pred <- predict(fit, test)
+  loocv[date] <- mean((test$PC1 - pred)^2)
+}
+mean(loocv)
+
+# PC3
+for (date in pcoa_df$Date) {
+  train <- filter(pcoa_df, Date != date)
+  test <- filter(pcoa_df, Date == date)
+  fit <- lm(PC3 ~ SpCond, data = train)
+  pred <- predict(fit, test)
+  loocv[date] <- mean((test$PC1 - pred)^2)
+}
+mean(loocv)
+```
+
+
+How good are individual predictors of each PC axis?
+```{r}
+summary(lm(PC1~pH, data = pcoa_df))
+
+summary(lm(PC2~Temp, data = pcoa_df))
+
+summary(lm(PC3~SpCond, data = pcoa_df))
+
+```
+
+
